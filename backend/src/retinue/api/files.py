@@ -41,6 +41,22 @@ READ_CHUNK = 1024 * 1024  # §11.2: RAM stays O(1 MB)
 _INLINE_MIME = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"}
 
 
+# One in-process lock per active upload session so concurrent PATCHes on the
+# same session (a client with parallel chunk workers, §11.3) serialize their
+# offset-check → append → offset-update instead of racing and corrupting the
+# object. The Solo/Team bundles are single-process; the T3 multi-replica path
+# would additionally need a DB row lock, documented as a tier concern.
+_UPLOAD_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
+
+
+def _upload_lock(upload_id: uuid.UUID) -> asyncio.Lock:
+    lock = _UPLOAD_LOCKS.get(upload_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _UPLOAD_LOCKS[upload_id] = lock
+    return lock
+
+
 def _open_append(path: Path) -> BinaryIO:  # append mode creates on first chunk
     return open(path, "ab")
 
@@ -295,39 +311,41 @@ async def upload_chunk(
     upload_offset: Annotated[int, Header(alias="Upload-Offset")] = 0,
 ) -> Response:
     state = get_state(request)
-    upload = await _session_or_404(state, user, upload_id)
-    if upload_offset != upload.received_bytes:
-        raise AppError(
-            CONFLICT,
-            "offset mismatch",
-            status=409,
-            details={"expected": upload.received_bytes},
-        )
+    # serialize concurrent PATCHes for this session (offset race, §11.3)
+    async with _upload_lock(upload_id):
+        upload = await _session_or_404(state, user, upload_id)
+        if upload_offset != upload.received_bytes:
+            raise AppError(
+                CONFLICT,
+                "offset mismatch",
+                status=409,
+                details={"expected": upload.received_bytes},
+            )
 
-    part = _uploads_dir(state) / f"{upload.id.hex}.part"
-    received = upload.received_bytes
-    hard_cap = upload.total_bytes
+        part = _uploads_dir(state) / f"{upload.id.hex}.part"
+        received = upload.received_bytes
+        hard_cap = upload.total_bytes
 
-    out = await asyncio.to_thread(_open_append, part)
-    try:
-        async for chunk in request.stream():
-            if not chunk:
-                continue
-            received += len(chunk)
-            if received > hard_cap:
-                raise AppError(VALIDATION_ERROR, "more bytes than declared size", status=413)
-            await asyncio.to_thread(out.write, chunk)
-        await asyncio.to_thread(out.flush)
-        import os
+        out = await asyncio.to_thread(_open_append, part)
+        try:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > hard_cap:
+                    raise AppError(VALIDATION_ERROR, "more bytes than declared size", status=413)
+                await asyncio.to_thread(out.write, chunk)
+            await asyncio.to_thread(out.flush)
+            import os
 
-        await asyncio.to_thread(os.fsync, out.fileno())
-    finally:
-        await asyncio.to_thread(out.close)
+            await asyncio.to_thread(os.fsync, out.fileno())
+        finally:
+            await asyncio.to_thread(out.close)
 
-    async with state.db.write_session() as session:
-        row = await session.get(UploadSession, upload.id)
-        assert row is not None
-        row.received_bytes = received
+        async with state.db.write_session() as session:
+            row = await session.get(UploadSession, upload.id)
+            assert row is not None
+            row.received_bytes = received
     return Response(status_code=204, headers={"Upload-Offset": str(received)})
 
 
@@ -387,6 +405,7 @@ async def complete_upload(
         await mark_ready(session, file.id, blake3_hex=digest, size=upload.total_bytes, mime=mime)
         await session.execute(sa_delete(UploadSession).where(UploadSession.id == upload.id))
         refreshed = await session.get(File, file.id)
+    _UPLOAD_LOCKS.pop(upload_id, None)
     await _enqueue_extraction(state, file.id)
     return FileOut.model_validate(refreshed)
 

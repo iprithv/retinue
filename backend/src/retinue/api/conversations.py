@@ -131,13 +131,18 @@ async def fork_conversation(
     user: Annotated[User, Depends(get_current_user)],
     at_message_id: uuid.UUID | None = None,
 ) -> ConversationOut:
-    """Fork copies nothing (§17): the new conversation records the fork point
-    and re-reads ancestor context lazily via its own first messages."""
+    """Fork the visible thread into a new, self-contained conversation (§17):
+    the messages and parts on the active branch up to the fork point are
+    materialized (with their attachments), and `forked_from_message_id`
+    records the provenance. Sibling branches are not copied."""
     state = get_state(request)
     source = await _owned(state, user, conversation_id)
 
     async with state.db.read_session() as session:
         thread = await load_thread(session, conversation_id, leaf_id=at_message_id)
+        attachments_by_message = await _attachments_by_message(
+            session, [tm.message.id for tm in thread]
+        )
     if not thread:
         raise AppError(NOT_FOUND, "conversation has no messages", status=404)
     fork_point = thread[-1].message
@@ -181,6 +186,15 @@ async def fork_conversation(
                         type=part.type,
                         content=part.content,
                         text_content=part.text_content,
+                    )
+                )
+            # carry attachments so the fork's context (vision, RAG) is intact
+            for attachment, _file in attachments_by_message.get(tm.message.id, []):
+                session.add(
+                    Attachment(
+                        message_id=new_msg_id,
+                        file_id=attachment.file_id,
+                        kind=attachment.kind,
                     )
                 )
             prev_id = new_msg_id

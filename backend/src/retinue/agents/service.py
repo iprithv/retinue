@@ -62,6 +62,29 @@ def _clean_tools(tools: list[Any]) -> list[dict[str, Any]]:
     return cleaned
 
 
+async def _assert_collections_accessible(
+    session: AsyncSession, created_by: uuid.UUID, collection_ids: list[Any]
+) -> list[str]:
+    """A version may only pin collections the creator owns or that are shared
+    org/public-wide — otherwise a crafted agent would read another user's
+    knowledge base at retrieval time (§10 / §16)."""
+    from retinue.db.models import Collection
+
+    cleaned: list[str] = []
+    for raw in collection_ids or []:
+        try:
+            cid = uuid.UUID(str(raw))
+        except ValueError as error:
+            raise AppError(VALIDATION_ERROR, f"bad collection id {raw!r}", status=422) from error
+        collection = await session.get(Collection, cid)
+        if collection is None or (
+            collection.owner_id != created_by and collection.visibility not in ("org", "public")
+        ):
+            raise AppError(NOT_FOUND, f"collection {cid} not found or not accessible", status=404)
+        cleaned.append(str(cid))
+    return cleaned
+
+
 async def create_version(
     session: AsyncSession,
     agent: Agent,
@@ -91,7 +114,7 @@ async def create_version(
         params=params or {},
         tools=_clean_tools(tools or []),
         mcp_servers=mcp_servers or [],
-        collection_ids=[str(c) for c in (collection_ids or [])],
+        collection_ids=await _assert_collections_accessible(session, created_by, collection_ids),
         starters=starters or [],
         changelog=changelog,
         created_by=created_by,

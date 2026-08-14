@@ -11,9 +11,10 @@ from pydantic import BaseModel, Field
 from retinue.agents.connectors import CONNECTORS, connector_catalog, substitute_params
 from retinue.agents.openapi_actions import ActionError, parse_operations
 from retinue.api.schemas import ActionOut, McpServerOut
-from retinue.api.tools import _action_out, _server_out
+from retinue.api.tools import _action_out, _is_admin, _server_out, assert_allowlist_permitted
 from retinue.core.deps import get_current_user
-from retinue.core.errors import NOT_FOUND, VALIDATION_ERROR, AppError
+from retinue.core.egress import assert_host_reachable
+from retinue.core.errors import FORBIDDEN, NOT_FOUND, VALIDATION_ERROR, AppError
 from retinue.core.ids import uuid7
 from retinue.core.state import get_state
 from retinue.db.models import McpServer, OpenApiAction, User
@@ -62,6 +63,18 @@ async def install_connector(
     name = body.name or connector.name
 
     if connector.kind in ("mcp-stdio", "mcp-http"):
+        # stdio connectors run a host command → admin-only (same as raw stdio
+        # MCP servers); http connectors are egress-checked (§9.3 / §16)
+        if connector.kind == "mcp-stdio" and not _is_admin(user):
+            raise AppError(
+                FORBIDDEN,
+                f"the {connector.name} connector runs a command on the host "
+                "(via its MCP server) — admin role required",
+                status=403,
+            )
+        if connector.kind == "mcp-http":
+            url = substitute_params(connector.url, body.params)
+            await assert_host_reachable(urlsplit(url).hostname or "", is_admin=_is_admin(user))
         secrets = {k: v for k, v in body.secrets.items() if v}
         ciphertext = nonce = None
         if secrets:
@@ -102,6 +115,8 @@ async def install_connector(
     host = urlsplit(base_url).hostname
     if host and host not in allowlist:
         allowlist.append(host)
+    # the resulting allowlist bypasses the SSRF private-range check → gate it
+    await assert_allowlist_permitted(allowlist, user)
 
     auth: dict[str, Any] = {}
     if connector.auth_type == "api_key_header":

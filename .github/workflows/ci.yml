@@ -25,9 +25,12 @@ jobs:
             python: "3.12"
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      # setup-python provides the interpreter uv installs into with --system;
+      # it also puts the console scripts (ruff/mypy/pytest) on PATH
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v5
       - name: install
         run: uv pip install --system -e "./backend[dev]"
       - name: lint
@@ -73,9 +76,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
       - run: uv pip install --system -e ./backend
       - run: python scripts/gen_ts_client.py --check
 
@@ -85,9 +89,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
       - uses: actions/download-artifact@v4
         with:
           name: frontend-dist

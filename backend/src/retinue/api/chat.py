@@ -428,7 +428,7 @@ async def send_chat(
 
 
 async def _send_chat_inner(
-    state: AppState, body: ChatSendRequest, user: User, last_event_id: int
+    state: AppState, body: ChatSendRequest, user: User, last_event_id: int, *, retried: bool = False
 ) -> StreamingResponse:
     async with state.db.read_session() as session:
         existing = await session.get(Message, body.message_id)
@@ -557,10 +557,18 @@ async def _send_chat_inner(
                 .where(Conversation.id == conversation.id)
                 .values(last_message_at=now_ms(), updated_at=now_ms())
             )
-    except IntegrityError:
-        # another replica won the same message id (multi-process T3): fall
-        # back to the idempotent existing-message path instead of a 500
-        return await _send_chat_inner(state, body, user, last_event_id)
+    except IntegrityError as error:
+        # a concurrent writer committed this exact message id first (the §31.4a
+        # race): re-enter the idempotent existing-message path exactly once.
+        # Any other integrity failure (e.g. a bad FK) is a real error, not a
+        # race — surface it instead of recursing forever.
+        async with state.db.read_session() as session:
+            now_exists = await session.get(Message, body.message_id)
+        if now_exists is not None and not retried:
+            return await _send_chat_inner(state, body, user, last_event_id, retried=True)
+        raise AppError(
+            CONFLICT, "could not persist the message; retry", status=409, retryable=True
+        ) from error
 
     return await _start_generation(
         state, user, conversation, user_message, model=body.model, chat_params=body.params

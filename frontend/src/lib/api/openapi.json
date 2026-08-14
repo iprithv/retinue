@@ -5321,7 +5321,7 @@
     },
     "/api/conversations/{conversation_id}/fork": {
       "post": {
-        "description": "Fork copies nothing (§17): the new conversation records the fork point\nand re-reads ancestor context lazily via its own first messages.",
+        "description": "Fork the visible thread into a new, self-contained conversation (§17):\nthe messages and parts on the active branch up to the fork point are\nmaterialized (with their attachments), and `forked_from_message_id`\nrecords the provenance. Sibling branches are not copied.",
         "operationId": "fork_conversation_api_conversations__conversation_id__fork_post",
         "parameters": [
           {

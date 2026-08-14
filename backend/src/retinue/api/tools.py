@@ -3,6 +3,7 @@ v0.2 scope: model reachability, MCP health, collections, sandbox)."""
 
 import uuid
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import orjson
 from fastapi import APIRouter, Depends, Request
@@ -18,7 +19,8 @@ from retinue.api.schemas import (
     McpToolOut,
 )
 from retinue.core.deps import get_current_user
-from retinue.core.errors import NOT_FOUND, VALIDATION_ERROR, AppError
+from retinue.core.egress import assert_host_reachable
+from retinue.core.errors import FORBIDDEN, NOT_FOUND, VALIDATION_ERROR, AppError
 from retinue.core.ids import uuid7
 from retinue.core.state import AppState, get_state
 from retinue.db.models import AgentVersion, Collection, McpServer, OpenApiAction, User
@@ -43,11 +45,21 @@ def _server_out(server: McpServer) -> McpServerOut:
     )
 
 
-async def _visible_server(state: AppState, user: User, server_id: uuid.UUID) -> McpServer:
+def _is_admin(user: User) -> bool:
+    return user.role in ("owner", "admin")
+
+
+async def _visible_server(
+    state: AppState, user: User, server_id: uuid.UUID, *, write: bool = False
+) -> McpServer:
     async with state.db.read_session() as session:
         server = await session.get(McpServer, server_id)
     if server is None or (server.owner_id is not None and server.owner_id != user.id):
         raise AppError(NOT_FOUND, "MCP server not found", status=404)
+    # org-global servers (owner_id is None) are visible to all but mutable only
+    # by admins — a member must not patch/delete/probe shared infrastructure
+    if write and server.owner_id is None and not _is_admin(user):
+        raise AppError(FORBIDDEN, "only admins can modify org-global servers", status=403)
     return server
 
 
@@ -79,12 +91,26 @@ async def create_server(
     user: Annotated[User, Depends(get_current_user)],
 ) -> McpServerOut:
     state = get_state(request)
-    if body.org and user.role not in ("owner", "admin"):
-        raise AppError(VALIDATION_ERROR, "only admins can create org-global servers", status=403)
-    if body.transport == "stdio" and not body.command:
-        raise AppError(VALIDATION_ERROR, "stdio transport requires a command", status=422)
-    if body.transport == "http" and not body.url:
-        raise AppError(VALIDATION_ERROR, "http transport requires a url", status=422)
+    if body.org and not _is_admin(user):
+        raise AppError(FORBIDDEN, "only admins can create org-global servers", status=403)
+    if body.transport == "stdio":
+        if not body.command:
+            raise AppError(VALIDATION_ERROR, "stdio transport requires a command", status=422)
+        # a stdio server runs an arbitrary command on the host — this is
+        # local code execution, so it is admin-only (parity with file
+        # datasources, §30.9 / §16 posture)
+        if not _is_admin(user):
+            raise AppError(
+                FORBIDDEN,
+                "stdio MCP servers run host commands — admin role required "
+                "(use an HTTP MCP server or an OpenAPI action instead)",
+                status=403,
+            )
+    if body.transport == "http":
+        if not body.url:
+            raise AppError(VALIDATION_ERROR, "http transport requires a url", status=422)
+        host = urlsplit(body.url).hostname or ""
+        await assert_host_reachable(host, is_admin=_is_admin(user))
 
     spec: dict[str, Any] = (
         {"command": body.command, "args": body.args}
@@ -118,7 +144,7 @@ async def patch_server(
     user: Annotated[User, Depends(get_current_user)],
 ) -> McpServerOut:
     state = get_state(request)
-    await _visible_server(state, user, server_id)
+    await _visible_server(state, user, server_id, write=True)
     updates = body.model_dump(exclude_unset=True)
     async with state.db.write_session() as session:
         server = await session.get(McpServer, server_id)
@@ -137,7 +163,7 @@ async def delete_server(
     user: Annotated[User, Depends(get_current_user)],
 ) -> None:
     state = get_state(request)
-    await _visible_server(state, user, server_id)
+    await _visible_server(state, user, server_id, write=True)
     await state.mcp.drop(server_id)
     async with state.db.write_session() as session:
         server = await session.get(McpServer, server_id)
@@ -179,6 +205,14 @@ async def server_tools(
 
 
 # -- OpenAPI actions -----------------------------------------------------------------
+
+
+async def assert_allowlist_permitted(hosts: list[str], user: User) -> None:
+    """An action's host_allowlist bypasses the SSRF private-range check
+    (§9.4), so entries that resolve to internal networks are admin-only and
+    link-local/metadata are never permitted."""
+    for host in hosts:
+        await assert_host_reachable(str(host), is_admin=_is_admin(user))
 
 
 def _action_out(action: OpenApiAction) -> ActionOut:
@@ -227,6 +261,7 @@ async def create_action(
         operations = parse_operations(body.spec)
     except ActionError as exc:
         raise AppError(VALIDATION_ERROR, str(exc), status=422) from exc
+    await assert_allowlist_permitted(list(body.host_allowlist or []), user)
 
     stored_spec = {
         "openapi": body.spec.get("openapi"),
@@ -316,21 +351,36 @@ async def preflight(
             continue
         async with state.db.read_session() as session:
             collection = await session.get(Collection, cid)
+        accessible = collection is not None and (
+            collection.owner_id == user.id or collection.visibility in ("org", "public")
+        )
         items.append(
             {
                 "check": "collection",
-                "ok": collection is not None,
-                "detail": collection.name if collection else f"missing collection {collection_id}",
+                "ok": accessible,
+                "detail": collection.name
+                if accessible and collection
+                else f"missing or inaccessible collection {collection_id}",
             }
         )
 
-    # MCP servers healthy + tools discovered
+    # MCP servers healthy + tools discovered — only ones this user may attach
+    # (owned or org-global); never probe another user's private server (§9.3)
     for attachment in version.mcp_servers or []:
         server_id = str(attachment.get("server_id", ""))
         try:
-            result = await state.mcp.test(uuid.UUID(server_id))
+            sid = uuid.UUID(server_id)
         except ValueError:
-            result = {"ok": False, "error": f"bad server id {server_id}"}
+            items.append({"check": "mcp", "ok": False, "detail": f"bad server id {server_id}"})
+            continue
+        async with state.db.read_session() as session:
+            server = await session.get(McpServer, sid)
+        if server is None or (server.owner_id is not None and server.owner_id != user.id):
+            items.append(
+                {"check": "mcp", "ok": False, "detail": "server not found or not accessible"}
+            )
+            continue
+        result = await state.mcp.test(sid)
         items.append(
             {
                 "check": "mcp",

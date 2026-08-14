@@ -37,7 +37,7 @@ from retinue.core.ids import uuid7
 from retinue.core.security import new_csrf_token, new_refresh_token
 from retinue.core.state import AppState, get_state
 from retinue.core.timeutil import now_ms
-from retinue.db.models import RefreshToken, User
+from retinue.db.models import AppSetting, RefreshToken, User
 
 router = APIRouter()
 
@@ -128,7 +128,13 @@ async def register(body: RegisterRequest, request: Request, response: Response) 
     email = body.email.lower()
     async with state.db.write_session() as session:
         user_count = (await session.execute(select(func.count(User.id)))).scalar_one()
-        if user_count > 0 and not state.settings.auth.registration_enabled:
+        # the admin setting (if present) overrides the config default so an
+        # owner can close registration at runtime without a restart
+        registration_enabled = state.settings.auth.registration_enabled
+        setting = await session.get(AppSetting, "registration_enabled")
+        if setting is not None and isinstance(setting.value, dict):
+            registration_enabled = bool(setting.value.get("value", registration_enabled))
+        if user_count > 0 and not registration_enabled:
             raise AppError(REGISTRATION_DISABLED, "registration is disabled", status=403)
         existing = (
             await session.execute(select(User).where(User.email == email))

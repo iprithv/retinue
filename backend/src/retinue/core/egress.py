@@ -23,6 +23,73 @@ def _deny(message: str) -> AppError:
     return AppError(EGRESS_DENIED, message, status=400)
 
 
+# Cloud metadata endpoints — never a legitimate agent target, blocked for
+# everyone including admins (§9.4 / §16 SSRF posture).
+_METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal", "100.100.100.100"}
+
+
+def _classify_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    if ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        return "blocked"  # link-local covers 169.254/16 (cloud metadata)
+    if ip.is_loopback:
+        return "loopback"
+    if ip.is_private:
+        return "private"
+    return "public"
+
+
+_ORDER = {"blocked": 4, "unresolved": 3, "loopback": 2, "private": 1, "public": 0}
+
+
+async def classify_host(host: str) -> str:
+    """Classify a host as 'public' | 'private' | 'loopback' | 'blocked'
+    (link-local/metadata) | 'unresolved'. A literal IP is classified directly;
+    a hostname resolving to several addresses takes its most restrictive one.
+    Resolution failure is reported as 'unresolved', not an error, so callers
+    can apply a trust-based policy."""
+    if host.lower() in _METADATA_HOSTS:
+        return "blocked"
+    try:
+        return _classify_ip(ipaddress.ip_address(host))  # literal IP
+    except ValueError:
+        pass
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except OSError:
+        return "unresolved"
+    if not infos:
+        return "unresolved"
+    worst = "public"
+    for info in infos:
+        klass = _classify_ip(ipaddress.ip_address(info[4][0]))
+        if _ORDER[klass] > _ORDER[worst]:
+            worst = klass
+    return worst
+
+
+async def assert_host_reachable(host: str, *, is_admin: bool) -> None:
+    """Egress policy for user-configured targets (MCP HTTP url, OpenAPI /
+    connector host_allowlist entries): public always; private/loopback and
+    unresolvable hostnames only for admins (§9.4 'admin-expandable' — admins
+    can already run host commands, so pointing at internal networks adds no
+    privilege); link-local/metadata never, for anyone."""
+    if not host:
+        raise _deny("host is required")
+    klass = await classify_host(host)
+    if klass == "public":
+        return
+    if klass == "blocked":
+        raise _deny(f"host {host!r} is a link-local/metadata address, which is never allowed")
+    if not is_admin:
+        detail = (
+            "does not resolve to a public address"
+            if klass == "unresolved"
+            else f"resolves to a {klass} address"
+        )
+        raise _deny(f"host {host!r} {detail}; only an admin may point tools at internal networks")
+
+
 async def _assert_public_host(host: str, port: int) -> None:
     loop = asyncio.get_running_loop()
     try:

@@ -238,10 +238,36 @@ async def get_schema(state: "AppState", source: DataSourceRow) -> SchemaModel:
         await adapter.close()
 
 
+def _assert_table_permitted(table: str, policy: SourcePolicy) -> None:
+    """sample()/db_sample skip the SQL AST guard, so the table allow/deny
+    lists (§30.3.5) are enforced here directly."""
+    name = table.split(".")[-1].strip('`"[]').lower()
+    if name in policy.deny_tables:
+        raise DataSourceError(f"table {name!r} is denied by this source's policy")
+    if policy.allow_tables and name not in policy.allow_tables:
+        raise DataSourceError(
+            f"table {name!r} is outside this source's allowlist "
+            f"({', '.join(sorted(policy.allow_tables))})"
+        )
+
+
 async def get_sample(
     state: "AppState", source: DataSourceRow, *, user_id: uuid.UUID, table: str, n: int
 ) -> QueryResult:
     policy = SourcePolicy.from_json(source.policy)
+    try:
+        _assert_table_permitted(table, policy)
+    except DataSourceError:
+        await _audit(
+            state,
+            user_id=user_id,
+            source=source,
+            statement=f"<sample {table}>",
+            ok=False,
+            rows=0,
+            elapsed_ms=0,
+        )
+        raise
     adapter = adapter_for(state, source)
     ok = False
     result: QueryResult | None = None

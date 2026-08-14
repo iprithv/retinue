@@ -15,7 +15,7 @@ from retinue.api.schemas import (
     JobOut,
 )
 from retinue.core.deps import get_admin_user
-from retinue.core.errors import CONFLICT, NOT_FOUND, AppError
+from retinue.core.errors import CONFLICT, FORBIDDEN, NOT_FOUND, AppError
 from retinue.core.state import get_state
 from retinue.core.timeutil import now_ms
 from retinue.db.models import AppSetting, AuditLog, Job, UsageEvent, User
@@ -48,12 +48,28 @@ async def patch_user(
 ) -> AdminUserOut:
     state = get_state(request)
     updates = body.model_dump(exclude_unset=True)
+    # only an owner may grant the owner role — otherwise any admin could
+    # self-promote to owner via the API (§16 RBAC: owner > admin)
+    new_role = updates.get("role")
+    if new_role == "owner" and admin.role != "owner":
+        raise AppError(FORBIDDEN, "only an owner can grant the owner role", status=403)
     async with state.db.write_session() as session:
         user = await session.get(User, user_id)
         if user is None:
             raise AppError(NOT_FOUND, "user not found", status=404)
-        if user.role == "owner" and updates.get("role") not in (None, "owner"):
-            raise AppError(CONFLICT, "the owner role cannot be demoted here", status=409)
+        if user.role == "owner" and new_role not in (None, "owner") and admin.role != "owner":
+            raise AppError(FORBIDDEN, "only an owner can change the owner's role", status=403)
+        if user.role == "owner" and new_role not in (None, "owner"):
+            # even an owner cannot demote the last owner
+            other_owners = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(User)
+                    .where(User.role == "owner", User.id != user.id)
+                )
+            ).scalar_one()
+            if other_owners == 0:
+                raise AppError(CONFLICT, "cannot demote the last owner", status=409)
         for field, value in updates.items():
             setattr(user, field, value)
         if updates.get("is_active") is False:
