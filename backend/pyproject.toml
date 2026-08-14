@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "retinue"
+version = "0.1.0"
+description = "Your AI retinue - self-hosted, multi-provider AI chat platform. One command, zero services."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Retinue contributors" }]
+keywords = ["ai", "llm", "chat", "agents", "self-hosted", "sse", "anthropic", "openai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Web Environment",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Chat",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "fastapi>=0.115",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "email-validator>=2.2",
+  "granian>=1.7",
+  "uvicorn>=0.32",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "aiosqlite>=0.20",
+  "alembic>=1.14",
+  "orjson>=3.10",
+  "httpx[http2]>=0.27",
+  "structlog>=24.4",
+  "tiktoken>=0.8",
+  "blake3>=0.4",
+  "cryptography>=43",
+  "argon2-cffi>=23.1",
+  "pyjwt[crypto]>=2.9",
+  "litellm>=1.55",
+  "typer>=0.15",
+]
+
+[project.optional-dependencies]
+postgres = ["asyncpg>=0.30", "psycopg[binary]>=3.2"]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "hypothesis>=6.115",
+  "ruff>=0.8",
+  "mypy>=1.13",
+]
+all = ["retinue[postgres]"]
+
+[project.scripts]
+retinue = "retinue.cli:main"
+
+[project.urls]
+Homepage = "https://retinue.dev"
+Repository = "https://github.com/retinue/retinue"
+Documentation = "https://retinue.dev/docs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retinue"]
+# The built SPA is copied into src/retinue/static by scripts/build_frontend_into_wheel.py.
+# `artifacts` forces inclusion even though the built assets are gitignored.
+artifacts = ["src/retinue/static/**"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md"]
+artifacts = ["src/retinue/static/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["perf: performance budget checks (excluded by default CI lanes)"]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::pydantic.PydanticDeprecatedSince20",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "C4", "RUF"]
+ignore = ["B008"] # FastAPI Depends() in defaults is idiomatic
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ASYNC", "RUF029"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+exclude = ["src/retinue/db/migrations/"]
+
+[[tool.mypy.overrides]]
+module = ["litellm", "litellm.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

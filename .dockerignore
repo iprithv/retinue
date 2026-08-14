@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+dist
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/*.tsbuildinfo
+frontend/dist
+backend/src/retinue/static
+docs
+*.md
+!backend/README.md

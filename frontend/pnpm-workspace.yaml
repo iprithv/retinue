@@ -1,0 +1,6 @@
+packages:
+  - "."
+
+# supply-chain policy: the only dependency allowed to run install scripts
+allowBuilds:
+  esbuild: true

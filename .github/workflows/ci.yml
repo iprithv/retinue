@@ -1,0 +1,103 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: install
+        run: uv pip install --system -e "./backend[dev]"
+      - name: lint
+        run: |
+          ruff check backend/src backend/tests
+          ruff format --check backend/src backend/tests
+      - name: test
+        run: python -m pytest backend/tests -q
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: unit tests
+        working-directory: frontend
+        run: pnpm run test
+      - name: typecheck + build
+        working-directory: frontend
+        run: pnpm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+  openapi-drift:
+    name: openapi snapshot drift (D24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv pip install --system -e ./backend
+      - run: python scripts/gen_ts_client.py --check
+
+  wheel:
+    name: wheel install smoke
+    needs: [frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - name: embed SPA + build wheel
+        run: |
+          uv pip install --system -e ./backend
+          python scripts/build_frontend_into_wheel.py --skip-build
+          uv build backend --wheel --sdist -o dist
+      - name: install + smoke
+        run: |
+          uv venv smoke-venv
+          uv pip install -p smoke-venv/bin/python dist/*.whl
+          smoke-venv/bin/retinue --version
+          RETINUE_HOME_DIR=$RUNNER_TEMP/retinue-home smoke-venv/bin/retinue doctor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

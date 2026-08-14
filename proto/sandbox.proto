@@ -1,0 +1,74 @@
+// Pre-cut gRPC seam A (§3.1, §12): core <-> sandbox-runner fleet.
+// UNUSED in v1 — execution is in-process (wasmtime/Docker behind
+// ExecutionBackend). This contract exists so extracting a runner fleet at T4
+// changes deployment, not interfaces. Data plane to browsers stays SSE.
+
+syntax = "proto3";
+
+package retinue.sandbox.v1;
+
+service SandboxRunner {
+  // Bidirectional: client streams code + stdin + cancellation; runner streams
+  // stdout/stderr chunks, artifacts, and the final result.
+  rpc Execute(stream ExecuteRequest) returns (stream ExecuteEvent);
+
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message ExecuteRequest {
+  oneof payload {
+    ExecSpec spec = 1;      // first message
+    bytes stdin_chunk = 2;  // optional follow-ups
+    Cancel cancel = 3;
+  }
+}
+
+message ExecSpec {
+  string language = 1;        // "python"
+  string code = 2;
+  repeated FileIn files = 3;  // preopened read-only inputs
+  Limits limits = 4;
+}
+
+message FileIn {
+  string path = 1;    // mounted under /in
+  bytes content = 2;  // small inline files; large ones arrive by blob ref
+  string blob_ref = 3;
+}
+
+message Limits {
+  uint32 wall_seconds = 1;  // default 30
+  uint32 memory_mb = 2;     // default 256
+  bool allow_network = 3;   // default false
+}
+
+message Cancel {}
+
+message ExecuteEvent {
+  oneof event {
+    bytes stdout_chunk = 1;
+    bytes stderr_chunk = 2;
+    Artifact artifact = 3;  // files written to /out
+    Result result = 4;      // terminal event
+  }
+}
+
+message Artifact {
+  string path = 1;
+  string blob_ref = 2;  // content-addressed (BLAKE3) handle
+  uint64 size = 3;
+}
+
+message Result {
+  int32 exit_code = 1;
+  bool timed_out = 2;
+  bool cancelled = 3;
+  string error = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string backend = 1;  // wasm|docker|firecracker
+  uint32 warm_pool = 2;
+}

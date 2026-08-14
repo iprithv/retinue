@@ -1,0 +1,26 @@
+# Solo/Team bundle (§27.2): one container, one volume, SQLite inside.
+#   docker compose -f deploy/docker-compose.yml up
+#
+# The Org bundle profile (postgres/redis/minio, §27.2) ships with the T3
+# hardening wave (v1.0 roadmap); the seams are already in the app config
+# (RETINUE_DATABASE_URL et al).
+
+services:
+  retinue:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ghcr.io/retinue/retinue:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - retinue-data:/data
+    environment:
+      # RETINUE_SECRET: set in production; auto-generated into /data otherwise
+      # OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY: optional env-based
+      #   provider keys (or add them in Settings, encrypted at rest)
+      RETINUE_LOG_FORMAT: json
+    restart: unless-stopped
+
+volumes:
+  retinue-data:
