@@ -1,7 +1,8 @@
 """Usage & cost summary (§18) — first-party dashboards from usage_events (§23)."""
 
 import datetime
-from typing import Annotated
+from collections.abc import Sequence
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, select
@@ -39,7 +40,7 @@ async def usage_summary(
         day_expr = UsageEvent.created_at.op("/")(86_400_000)
         day_rows = (await session.execute(base.add_columns(day_expr).group_by(day_expr))).all()
 
-    def totals(row: tuple) -> dict:
+    def totals(row: Sequence[Any]) -> dict[str, Any]:
         return {
             "input_tokens": int(row[0]),
             "output_tokens": int(row[1]),

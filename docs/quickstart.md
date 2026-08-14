@@ -72,3 +72,24 @@ docker compose -f deploy/docker-compose.yml up
 ```bash
 retinue db backup            # consistent snapshot via VACUUM INTO
 ```
+
+## A five-minute tour
+
+- **Agents** — sidebar → *Agents* → *New agent*. Give it a prompt, pick a
+  model, toggle tools (web search, page fetch, files, databases, images,
+  code). Test it live in the right pane; **Save as vN** publishes a new
+  immutable version. Chats pin the version they start with.
+- **Files & knowledge** — sidebar → *Files*. Drop files (identical content is
+  stored once), create a collection, add files to it, then pin the collection
+  to an agent — its answers will cite sources as `[n]`.
+- **Databases** — Settings → *Data sources*. Pick an engine, fill in the
+  connection, hit *test* to watch the DNS → TCP → auth → probe ladder, then
+  give an agent the `db_query` tool. Queries are read-only, row-limited, and
+  audit-logged no matter what the model asks for.
+- **Connectors** — Settings → *Connectors*. One-click Slack, GitHub, Jira,
+  Grafana, PagerDuty, and 17 more; each becomes an MCP server or API action
+  you attach to agents in the studio.
+- **Search** — press `⌘K` anywhere.
+- **Memory** — Settings → *Memory*. Retinue proposes durable facts after
+  conversations (review mode by default); approve, edit, disable, or turn it
+  off entirely. Incognito chats never touch it.

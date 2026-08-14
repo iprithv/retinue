@@ -67,14 +67,60 @@ class ContextSettings(BaseModel):
 class ModelsSettings(BaseModel):
     default: str | None = None  # e.g. "openai/gpt-4o"; None = first available
     housekeeping: str | None = None  # cheap-small class for titles etc. (§31.3)
+    embedding: str | None = None  # None = text-embedding-3-small (mock/embed in mock mode)
     mock_enabled: bool = False  # dev/test provider ("mock/echo")
     list_ttl_s: int = 3600  # §8 model list cache TTL
+
+
+class FilesSettings(BaseModel):
+    """§11 limits & policy (admin-tunable)."""
+
+    direct_max_mb: int = 20  # path A ceiling; larger files use resumable path B
+    max_file_mb: int = 512
+    chunk_size_mib: int = 8
+    session_ttl_h: int = 24
+    mime_deny: list[str] = Field(default_factory=list)
+
+
+class RagSettings(BaseModel):
+    """§10 chunking + retrieval knobs."""
+
+    chunk_target_tokens: int = 800
+    chunk_overlap_frac: float = 0.15
+    fts_top_n: int = 40
+    vector_top_n: int = 40
+    rrf_k: int = 60
+    top_k: int = 6
+
+
+class WebSearchSettings(BaseModel):
+    """SearchProvider seam (§9.2): searxng|tavily|brave|serper|jina, or none
+    (the tool answers with a clean 'not configured' error)."""
+
+    provider: Literal["none", "searxng", "tavily", "brave", "serper", "jina"] = "none"
+    url: str | None = None  # searxng base url
+    api_key: str | None = None  # tavily/brave/serper/jina
+    max_results: int = 5
+
+
+class ToolsSettings(BaseModel):
+    """§9.2 runtime guards."""
+
+    max_iterations: int = 10
+    per_tool_timeout_s: float = 30.0
+    wall_clock_s: float = 300.0
+    approval_timeout_s: float = 300.0
+    web_search: WebSearchSettings = Field(default_factory=WebSearchSettings)
+    # §9.2 image generation tool; None = disabled ("mock/image" in mock mode for dev)
+    image_gen_model: str | None = None
+    web_fetch_max_chars: int = 24_000
 
 
 class RateLimitSettings(BaseModel):
     enabled: bool = True
     auth_per_min: float = 5
     chat_per_min: float = 30
+    uploads_per_min: float = 20
     default_per_min: float = 240
     burst_factor: float = 2.0
 
@@ -102,6 +148,9 @@ class Settings(BaseSettings):
     context: ContextSettings = Field(default_factory=ContextSettings)
     models: ModelsSettings = Field(default_factory=ModelsSettings)
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+    files: FilesSettings = Field(default_factory=FilesSettings)
+    rag: RagSettings = Field(default_factory=RagSettings)
+    tools: ToolsSettings = Field(default_factory=ToolsSettings)
 
     @classmethod
     def settings_customise_sources(

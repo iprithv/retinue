@@ -7,9 +7,10 @@ and must not tax CLI startup (§20 lazy-imports rule).
 from collections.abc import AsyncIterator
 from typing import Any
 
+import orjson
 import structlog
 
-from retinue.providers.base import ChatCall, NormalizedEvent, ProviderError, Usage
+from retinue.providers.base import ChatCall, NormalizedEvent, ProviderError, ToolUse, Usage
 
 log = structlog.get_logger("retinue.providers.litellm")
 
@@ -81,9 +82,13 @@ class LiteLLMAdapter:
         litellm = _lazy_litellm()
         kwargs = self._kwargs(call)
         kwargs["stream"] = True
+        if call.tools:
+            kwargs["tools"] = call.tools
         provider = call.model.split("/", 1)[0] if "/" in call.model else "openai"
         if provider in _STREAM_USAGE_PROVIDERS:
             kwargs["stream_options"] = {"include_usage": True}
+        # tool-call argument deltas accumulate per stream index until finish
+        pending_tools: dict[int, dict[str, str]] = {}
         try:
             response = await litellm.acompletion(**kwargs)
             async for chunk in response:
@@ -102,9 +107,40 @@ class LiteLLMAdapter:
                     content = getattr(delta, "content", None)
                     if content:
                         yield NormalizedEvent(kind="text_delta", text=content)
+                    for tc in getattr(delta, "tool_calls", None) or []:
+                        idx = getattr(tc, "index", 0) or 0
+                        slot = pending_tools.setdefault(idx, {"id": "", "name": "", "args": ""})
+                        if getattr(tc, "id", None):
+                            slot["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                slot["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                slot["args"] += fn.arguments
                 finish = getattr(choice, "finish_reason", None)
                 if finish:
-                    yield NormalizedEvent(kind="stop", stop_reason=_STOP_REASONS.get(finish, "end"))
+                    if finish == "tool_calls" or pending_tools:
+                        for idx in sorted(pending_tools):
+                            slot = pending_tools[idx]
+                            try:
+                                args = orjson.loads(slot["args"]) if slot["args"] else {}
+                            except orjson.JSONDecodeError:
+                                args = {"_raw": slot["args"]}
+                            yield NormalizedEvent(
+                                kind="tool_use",
+                                tool_use=ToolUse(
+                                    call_id=slot["id"] or f"call_{idx}",
+                                    name=slot["name"],
+                                    args=args if isinstance(args, dict) else {"_raw": args},
+                                ),
+                            )
+                        pending_tools.clear()
+                        yield NormalizedEvent(kind="stop", stop_reason="tool_use")
+                    else:
+                        yield NormalizedEvent(
+                            kind="stop", stop_reason=_STOP_REASONS.get(finish, "end")
+                        )
         except Exception as exc:  # normalize every provider failure at the seam
             raise _map_error(exc) from exc
 

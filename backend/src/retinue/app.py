@@ -21,6 +21,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
 import retinue
+from retinue.agents.mcp_manager import McpManager
 from retinue.api import build_api_router
 from retinue.config import Settings
 from retinue.core.chat_engine import ChatEngine
@@ -36,11 +37,13 @@ from retinue.core.tokens import TokenCounter
 from retinue.db.migrate import run_migrations
 from retinue.db.models import Message
 from retinue.db.session import Database
+from retinue.filesys.local import LocalStorage
 from retinue.jobs.handlers import builtin_handlers
 from retinue.jobs.queue import JobQueue
 from retinue.jobs.worker import JobContext, JobWorker
 from retinue.providers.pricing import PricingTable
 from retinue.providers.registry import ProviderRegistry
+from retinue.sandbox.wasm import WasmSandbox
 
 log = structlog.get_logger("retinue.app")
 
@@ -168,12 +171,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pricing = PricingTable(settings.resolved_data_dir / "pricing_overrides.json")
         counter = TokenCounter()
         jobs = JobQueue(db)
+        job_ctx = JobContext(
+            db=db, settings=settings, registry=registry, hub=hub, counter=counter, jobs=jobs
+        )
         worker = JobWorker(
             db=db,
             queue=jobs,
-            ctx=JobContext(db=db, settings=settings, registry=registry, hub=hub, counter=counter),
+            ctx=job_ctx,
             handlers=builtin_handlers(),
         )
+        storage = LocalStorage(settings.resolved_data_dir / "files")
+        mcp = McpManager(db, box)
+        sandbox = WasmSandbox(settings.home_dir / "sandbox")
         engine = ChatEngine(
             db=db,
             hub=hub,
@@ -197,7 +206,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             box=box,
             limiter=RateLimiter(settings.ratelimit.enabled),
             counter=counter,
+            storage=storage,
+            mcp=mcp,
+            sandbox=sandbox,
         )
+        job_ctx.state = app.state.retinue  # handlers reach services through here
         worker.start()
         counter.warm()  # tiktoken loads off-thread; counts are heuristic until then
         if settings.models.mock_enabled:
@@ -214,6 +227,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await hub.shutdown()
             await worker.stop()
+            await mcp.shutdown()
             await db.dispose()
             log.info("retinue_stopped")
 

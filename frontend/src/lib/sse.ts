@@ -47,7 +47,7 @@ export async function postSSE(
 
   const parser = createParser({
     onEvent(event) {
-      let data: Record<string, unknown> = {};
+      let data: Record<string, unknown>;
       try {
         data = event.data ? (JSON.parse(event.data) as Record<string, unknown>) : {};
       } catch {

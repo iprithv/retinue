@@ -46,3 +46,49 @@ UI work and tests without any API key.
   `retinue.db.models`; both SQLite and Postgres must apply.
 - No optimization PR without a before/after number (§20).
 - Contributions require DCO sign-off (`git commit -s`).
+
+## Spec deviations shipped in v0.6 (each has a seam back to spec)
+
+- **Vectors**: inline float32 BLOBs + brute-force cosine instead of sqlite-vec
+  virtual tables — correct at Solo-bundle scale; `rag/embed.py`/`rag/retrieve.py`
+  are the swap seam for sqlite-vec/pgvector (§27.4 ladder).
+- **Sandbox**: the WASM backend needs `pip install retinue[sandbox-wasm]` plus a
+  WASI CPython at `~/.retinue/sandbox/python.wasm`; absent that, `code_exec`
+  returns an honest "sandbox unavailable" tool error (§27.5 floor). Docker
+  backend not yet wired.
+- **Web search**: SearchProvider seam configured via
+  `RETINUE_TOOLS__WEB_SEARCH__*` (searxng/tavily/brave); off by default.
+- **Extraction extras**: PDF/DOCX/XLSX/HTML need `retinue[extract]`; text-family
+  formats extract with the core wheel. No thumbnails/OCR yet (§11.6 partial).
+- **Postgres search**: ILIKE fallback until the tsvector tier (§13); the FTS5
+  path is SQLite-only and CI-tested.
+- Still deferred from v0.1: OIDC login, generated TS client (schema-snapshot
+  drift check instead), TanStack Virtual in the message list, importers for
+  third-party chat exports, budgets middleware, `migrate-to-postgres`.
+
+## v0.7: Universal Data Layer & connectors — honest notes
+
+- **28 datasource engines** are registered; SQLite and DuckDB are exercised
+  end-to-end in CI. The Postgres/MySQL wire families share those adapters'
+  code paths; the remaining engines (Snowflake, BigQuery, Mongo, …) have
+  small adapters over their official clients that are *structurally* tested
+  (registry integrity, clean missing-driver errors) but need a live server to
+  verify — they are honest first implementations, not battle-tested ones.
+  Read-only enforcement does not depend on the engine: the sqlglot AST guard
+  and the NoSQL operation allowlists run before any driver code.
+- **Connectors** are pinned recipes over the MCP/OpenAPI bus, not bespoke
+  clients. stdio recipes need their runtime (npx/uvx/binary) on the host —
+  the install response says so. Bundled API subsets (Prometheus, PagerDuty,
+  Opsgenie, New Relic, Splunk, Zendesk, ServiceNow, Intercom, webhooks) are
+  minimal read/notify surfaces, deliberately not full API mirrors.
+
+### Feature-parity notes vs. other self-hosted chat platforms
+
+Where we are ahead: versioned agents with pinning, resumable deduplicated
+uploads, lossless SSE resume, per-call tool approvals, read-only database
+layer with staged connection tests, whole-account export/import, mypy-strict
+backend. At parity: multi-provider chat, MCP, RAG with citations, memory,
+branching/forking, share links, search, vision input, image generation,
+temporary chats, multi-user with admin. Honest gaps that remain: OIDC/LDAP
+social login, speech (STT/TTS), a live artifacts preview panel, prompt
+library, i18n, and importers for other platforms' chat exports.

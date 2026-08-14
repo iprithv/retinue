@@ -50,6 +50,19 @@ def _fractions(cfg: ContextSettings) -> dict[str, float]:
     }
 
 
+def _fit_block(text: str, cap: int, counter: TokenCounter) -> tuple[str, int] | None:
+    """Fit a context block into `cap` tokens, truncating deterministically.
+    Returns None when the cap is too small to carry anything useful."""
+    if cap < 32:
+        return None
+    tokens = counter.count(text)
+    if tokens <= cap:
+        return text, tokens
+    # ~4 chars/token heuristic, then measure once more; deterministic either way
+    truncated = text[: cap * 4] + "\n…(truncated)"
+    return truncated, counter.count(truncated)
+
+
 def assemble_context(
     *,
     system_prompt: str | None,
@@ -58,6 +71,8 @@ def assemble_context(
     requested_max_output: int | None,
     counter: TokenCounter,
     context_cfg: ContextSettings,
+    memory_block: str | None = None,
+    rag_block: str | None = None,
 ) -> AssembledContext:
     """history is chronological and ends with the current user turn."""
     max_output = min(
@@ -77,20 +92,40 @@ def assemble_context(
         BudgetItem(tokens=counter.count_message(entry.role, entry.text), payload=entry)
         for entry in newest_first
     ]
+    sources: dict[str, list[BudgetItem]] = {"history": items}
+    if rag_block:
+        sources["rag"] = [BudgetItem(tokens=counter.count(rag_block), payload=rag_block)]
+    if memory_block:
+        sources["memory"] = [BudgetItem(tokens=counter.count(memory_block), payload=memory_block)]
 
     alloc = allocate(
         context_window=model_info.context_window,
         max_output=max_output,
         reserved=reserved,
-        sources={"history": items},
+        sources=sources,
         fractions=_fractions(context_cfg),
         min_keep={"history": context_cfg.min_history_messages},
     )
 
+    # blocks that missed their cap outright still get a truncated seat if the
+    # cap allows (§31.2: overflow is deterministic, never a provider 400)
+    context_blocks: list[str] = []
+    for tier, block in (("memory", memory_block), ("rag", rag_block)):
+        if not block:
+            continue
+        if alloc.kept.get(tier):
+            context_blocks.append(str(alloc.kept[tier][0].payload))
+        else:
+            fitted = _fit_block(block, alloc.caps.get(tier, 0), counter)
+            if fitted is not None:
+                context_blocks.append(fitted[0])
+                alloc.spent[tier] = fitted[1]
+
     kept_chronological = [item.payload for item in reversed(alloc.kept["history"])]
     messages: list[dict[str, Any]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
+    system_parts = [p for p in [system_prompt, *context_blocks] if p]
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
     messages.extend({"role": e.role, "content": e.text} for e in kept_chronological)
 
     breakdown = {"system": reserved, "max_output": max_output, **alloc.breakdown()}
@@ -98,5 +133,5 @@ def assemble_context(
         messages=messages,
         max_output=max_output,
         breakdown=breakdown,
-        input_token_estimate=reserved + alloc.spent.get("history", 0),
+        input_token_estimate=reserved + sum(alloc.spent.values()),
     )

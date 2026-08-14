@@ -1,0 +1,53 @@
+name: Bug report
+description: Something is broken
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security vulnerabilities go to the private
+        channel in [SECURITY.md](../../SECURITY.md), never a public issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. retinue serve
+        2. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Retinue version
+      description: "`retinue --version`"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options: [pip / uv, Docker, source checkout]
+    validations:
+      required: true
+  - type: input
+    id: bundle
+    attributes:
+      label: Bundle / environment
+      description: OS, Python version, SQLite or Postgres, and any non-default backends in use
+      placeholder: "Ubuntu 24.04, Python 3.12, SQLite, WASM sandbox"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "`retinue doctor --report` output or server logs (secrets are redacted, but double-check)"
+      render: text

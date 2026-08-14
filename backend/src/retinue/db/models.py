@@ -237,6 +237,230 @@ class MessagePart(Base):
     text_content: Mapped[str | None] = mapped_column(Text)  # feeds FTS (v0.5)
 
 
+# -- Files (§11, §17) ------------------------------------------------------------
+
+
+class Blob(Base):
+    """Content-addressed storage record: the BLAKE3 of the bytes is the key."""
+
+    __tablename__ = "blobs"
+
+    blake3: Mapped[str] = mapped_column(Text, primary_key=True)
+    size: Mapped[int] = mapped_column(BigInteger)
+    storage_backend: Mapped[str] = mapped_column(Text)  # local|s3
+    storage_key: Mapped[str] = mapped_column(Text)
+    refcount: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+class File(Base):
+    __tablename__ = "files"
+    __table_args__ = (Index("ix_files_owner_recent", "owner_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    blake3: Mapped[str | None] = mapped_column(Text, ForeignKey("blobs.blake3"))
+    original_name: Mapped[str] = mapped_column(Text)
+    mime: Mapped[str] = mapped_column(Text)
+    size: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(Text, default="uploading")  # uploading|ready|failed
+    meta: Mapped[dict[str, Any]] = mapped_column(JSONVal, default=dict)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+class UploadSession(Base):
+    __tablename__ = "upload_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    file_id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, ForeignKey("files.id", ondelete="CASCADE"))
+    received_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_bytes: Mapped[int] = mapped_column(BigInteger)
+    chunk_size: Mapped[int] = mapped_column(Integer)
+    s3_upload_id: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[int] = mapped_column(BigInteger)
+
+
+class FileText(Base):
+    """Extracted text per file: drives file search and chat-about-this-file."""
+
+    __tablename__ = "file_texts"
+
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("files.id", ondelete="CASCADE"), primary_key=True
+    )
+    text: Mapped[str] = mapped_column(Text)
+    extracted_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    extractor: Mapped[str] = mapped_column(Text)
+
+
+class Attachment(Base):
+    __tablename__ = "attachments"
+
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, ForeignKey("files.id"), primary_key=True)
+    kind: Mapped[str] = mapped_column(Text)  # image|document
+
+
+# -- RAG (§10, §17) ----------------------------------------------------------------
+
+
+class Collection(Base):
+    __tablename__ = "collections"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    embed_model: Mapped[str] = mapped_column(Text)
+    embed_dim: Mapped[int] = mapped_column(Integer)
+    visibility: Mapped[str] = mapped_column(Text, default="private")
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+class CollectionFile(Base):
+    __tablename__ = "collection_files"
+
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("files.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(Text, default="pending")  # pending|indexed|failed
+
+
+class Chunk(Base):
+    """RAG chunk. `embedding` holds packed little-endian float32 (§10; inline
+    BLOB vectors + brute-force cosine is the Solo-scale engine — the
+    VectorIndex seam swaps in sqlite-vec/pgvector without touching callers)."""
+
+    __tablename__ = "chunks"
+    __table_args__ = (Index("ix_chunks_coll_file", "collection_id", "file_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("collections.id", ondelete="CASCADE")
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, ForeignKey("files.id", ondelete="CASCADE"))
+    idx: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    token_count: Mapped[int] = mapped_column(Integer)
+    loc: Mapped[dict[str, Any]] = mapped_column(JSONVal, default=dict)
+    embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
+
+
+class EmbedCache(Base):
+    """§31.3: identical text never embeds twice (keyed by content hash + model)."""
+
+    __tablename__ = "embed_cache"
+
+    blake3: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    dim: Mapped[int] = mapped_column(Integer)
+    vector: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+# -- Memory (§14) -------------------------------------------------------------------
+
+
+class Memory(Base):
+    __tablename__ = "memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, ForeignKey("users.id", ondelete="CASCADE"))
+    content: Mapped[str] = mapped_column(Text)
+    source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUIDBlob)
+    status: Mapped[str] = mapped_column(Text, default="active")  # proposed|active|disabled
+    embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    updated_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+# -- Tools: MCP servers & OpenAPI actions (§9.3, §9.4) --------------------------------
+
+
+class McpServer(Base):
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDBlob, ForeignKey("users.id", ondelete="CASCADE")
+    )  # NULL = org-global
+    name: Mapped[str] = mapped_column(Text)
+    transport: Mapped[str] = mapped_column(Text)  # stdio|http
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONVal, default=dict)  # command/args or url
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)  # env/headers, encrypted
+    secret_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_status: Mapped[dict[str, Any] | None] = mapped_column(JSONVal)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+class OpenApiAction(Base):
+    __tablename__ = "openapi_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(Text)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONVal, default=dict)
+    auth_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)  # encrypted auth config
+    auth_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    host_allowlist: Mapped[list[Any]] = mapped_column(JSONVal, default=list)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+# -- Data sources (§30) -----------------------------------------------------------------
+
+
+class DataSourceRow(Base):
+    """§30.9 data_sources: an external engine agents may query (read-only).
+
+    Non-secret connection config lives in `config`; secrets (password/token)
+    are one AES-256-GCM blob. `policy` carries §30.3 limits/filters/masking.
+    """
+
+    __tablename__ = "data_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(Text)
+    engine: Mapped[str] = mapped_column(Text)  # registry key (§30.2)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONVal, default=dict)
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    secret_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONVal, default=dict)
+    status: Mapped[str] = mapped_column(Text, default="unverified")  # unverified|ok|failed
+    last_test: Mapped[dict[str, Any] | None] = mapped_column(JSONVal)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
+# -- Shares (§18) ---------------------------------------------------------------------
+
+
+class Share(Base):
+    __tablename__ = "shares"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDBlob, primary_key=True, default=uuid7)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDBlob, ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    token: Mapped[str] = mapped_column(Text, unique=True)
+    mode: Mapped[str] = mapped_column(Text, default="read")
+    expires_at: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
 # -- Ops ------------------------------------------------------------------------
 
 

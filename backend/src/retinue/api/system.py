@@ -1,12 +1,9 @@
-"""Ops + data endpoints (§18): healthz, readyz, export, guarded image proxy."""
+"""Ops endpoints (§18): healthz, readyz, guarded image proxy. Data takeout
+lives in api.dataio."""
 
-import io
-import zipfile
 from typing import Annotated
 
-import orjson
 from fastapi import APIRouter, Depends, Query, Request, Response
-from sqlalchemy import select
 
 import retinue
 from retinue.api.schemas import HealthOut
@@ -14,8 +11,7 @@ from retinue.core.deps import get_current_user
 from retinue.core.egress import fetch_guarded
 from retinue.core.errors import EGRESS_DENIED, NOT_READY, AppError, error_body, json_response
 from retinue.core.state import get_state
-from retinue.core.timeutil import now_ms
-from retinue.db.models import Conversation, Message, MessagePart, User
+from retinue.db.models import User
 
 router = APIRouter()
 
@@ -46,101 +42,6 @@ async def readyz(request: Request) -> Response:
     return json_response(
         error_body(NOT_READY, "service not ready", retryable=True, details=checks),
         status_code=503,
-    )
-
-
-@router.get("/export")
-async def export_data(
-    request: Request, user: Annotated[User, Depends(get_current_user)]
-) -> Response:
-    """User data takeout: conversations + messages as JSONL in a zip (§18 Data)."""
-    state = get_state(request)
-    async with state.db.read_session() as session:
-        conversations = (
-            (await session.execute(select(Conversation).where(Conversation.user_id == user.id)))
-            .scalars()
-            .all()
-        )
-        conv_ids = [c.id for c in conversations]
-        messages = []
-        parts_by_message: dict = {}
-        if conv_ids:
-            messages = (
-                (
-                    await session.execute(
-                        select(Message)
-                        .where(Message.conversation_id.in_(conv_ids))
-                        .order_by(Message.created_at)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for part in (
-                (
-                    await session.execute(
-                        select(MessagePart).where(
-                            MessagePart.message_id.in_([m.id for m in messages])
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            ):
-                parts_by_message.setdefault(part.message_id, []).append(part)
-
-    conv_lines = b"\n".join(
-        orjson.dumps(
-            {
-                "id": str(c.id),
-                "title": c.title,
-                "model_override": c.model_override,
-                "pinned": c.pinned,
-                "folder": c.folder,
-                "created_at": c.created_at,
-                "last_message_at": c.last_message_at,
-            }
-        )
-        for c in conversations
-    )
-    msg_lines = b"\n".join(
-        orjson.dumps(
-            {
-                "id": str(m.id),
-                "conversation_id": str(m.conversation_id),
-                "parent_id": str(m.parent_id) if m.parent_id else None,
-                "role": m.role,
-                "status": m.status,
-                "model": m.model,
-                "created_at": m.created_at,
-                "parts": [
-                    {"idx": p.idx, "type": p.type, "content": p.content}
-                    for p in sorted(parts_by_message.get(m.id, []), key=lambda p: p.idx)
-                ],
-            }
-        )
-        for m in messages
-    )
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("conversations.jsonl", conv_lines)
-        archive.writestr("messages.jsonl", msg_lines)
-        archive.writestr(
-            "manifest.json",
-            orjson.dumps(
-                {
-                    "app": "retinue",
-                    "version": retinue.__version__,
-                    "exported_at": now_ms(),
-                    "user": user.email,
-                }
-            ),
-        )
-    return Response(
-        content=buffer.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="retinue-export.zip"'},
     )
 
 

@@ -8,6 +8,13 @@ export interface StreamingPart {
   index: number;
   type: string;
   text: string;
+  data?: Record<string, unknown>;
+}
+
+export interface PendingApproval {
+  call_id: string;
+  name: string;
+  args: Record<string, unknown>;
 }
 
 export interface StreamError {
@@ -24,6 +31,7 @@ export interface StreamingSnapshot {
   status: "streaming" | "done" | "error";
   stopReason: string | null;
   error: StreamError | null;
+  approvals: readonly PendingApproval[];
   version: number;
 }
 
@@ -36,7 +44,11 @@ const raf: (cb: () => void) => number =
 
 class StreamingStore {
   private snapshots = new Map<string, StreamingSnapshot>();
-  private buffers = new Map<string, Map<number, { type: string; text: string }>>();
+  private buffers = new Map<
+    string,
+    Map<number, { type: string; text: string; data?: Record<string, unknown> }>
+  >();
+  private approvals = new Map<string, PendingApproval[]>();
   private listeners = new Map<string, Set<Listener>>();
   private anyListeners = new Set<Listener>();
   private byConversation = new Map<string, string>();
@@ -56,8 +68,10 @@ class StreamingStore {
       status: "streaming",
       stopReason: null,
       error: null,
+      approvals: [],
       version: 0,
     });
+    this.approvals.set(messageId, []);
     this.byConversation.set(conversationId, messageId);
     this.notifyNow(messageId);
   }
@@ -87,6 +101,38 @@ class StreamingStore {
     this.markDirty(messageId);
   }
 
+  /** JSON blocks: tool_call / tool_result / citation events (§19). */
+  jsonBlock(messageId: string, index: number, type: string, data: Record<string, unknown>): void {
+    const buffer = this.buffers.get(messageId);
+    if (!buffer) return;
+    buffer.set(index, { type, text: "", data });
+    if (type === "tool_result") {
+      const pending = this.approvals.get(messageId);
+      if (pending) {
+        this.approvals.set(
+          messageId,
+          pending.filter((a) => a.call_id !== data.call_id),
+        );
+      }
+    }
+    this.markDirty(messageId);
+  }
+
+  addApproval(messageId: string, approval: PendingApproval): void {
+    const pending = this.approvals.get(messageId) ?? [];
+    this.approvals.set(messageId, [...pending, approval]);
+    this.markDirty(messageId);
+  }
+
+  resolveApproval(messageId: string, callId: string): void {
+    const pending = this.approvals.get(messageId) ?? [];
+    this.approvals.set(
+      messageId,
+      pending.filter((a) => a.call_id !== callId),
+    );
+    this.markDirty(messageId);
+  }
+
   fail(messageId: string, error: StreamError): void {
     const snapshot = this.snapshots.get(messageId);
     if (!snapshot) return;
@@ -109,6 +155,7 @@ class StreamingStore {
     const snapshot = this.snapshots.get(messageId);
     this.snapshots.delete(messageId);
     this.buffers.delete(messageId);
+    this.approvals.delete(messageId);
     if (snapshot && this.byConversation.get(snapshot.conversationId) === messageId) {
       this.byConversation.delete(snapshot.conversationId);
     }
@@ -129,8 +176,13 @@ class StreamingStore {
     const buffer = this.buffers.get(messageId) ?? new Map();
     const parts: StreamingPart[] = [...buffer.entries()]
       .sort(([a], [b]) => a - b)
-      .map(([index, block]) => ({ index, type: block.type, text: block.text }));
-    return { ...previous, parts, version: previous.version + 1 };
+      .map(([index, block]) => ({ index, type: block.type, text: block.text, data: block.data }));
+    return {
+      ...previous,
+      parts,
+      approvals: [...(this.approvals.get(messageId) ?? [])],
+      version: previous.version + 1,
+    };
   }
 
   private flush(): void {

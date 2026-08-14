@@ -15,8 +15,10 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from retinue.api.schemas import (
+    ApprovalRequest,
     ChatParams,
     ChatSendRequest,
     MessageEditRequest,
@@ -25,6 +27,7 @@ from retinue.api.schemas import (
 )
 from retinue.api.serialize import message_out
 from retinue.core.assembly import assemble_context
+from retinue.core.context_extras import gather_context_extras
 from retinue.core.deps import get_current_user, rate_limit
 from retinue.core.errors import (
     CONFLICT,
@@ -36,25 +39,67 @@ from retinue.core.errors import (
 from retinue.core.history import load_thread, to_history
 from retinue.core.ids import uuid7
 from retinue.core.sse import (
+    APPROVAL_REQUIRED,
     BLOCK_START,
+    CITATION,
     DELTA,
     ERROR,
     HEARTBEAT,
     MESSAGE_END,
     MESSAGE_START,
     RESYNC_REQUIRED,
+    TOOL_CALL,
+    TOOL_RESULT,
     encode_sse,
 )
 from retinue.core.state import AppState, get_state
 from retinue.core.streams import LiveStream
 from retinue.core.timeutil import now_ms
-from retinue.db.models import Conversation, Message, MessagePart, User
+from retinue.db.models import (
+    Agent,
+    AgentVersion,
+    Attachment,
+    Conversation,
+    File,
+    Message,
+    MessagePart,
+    User,
+)
 
 log = structlog.get_logger("retinue.api.chat")
 
 router = APIRouter()
 
 SSE_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+
+
+def _block_frames(
+    index: int, block_type: str, content: dict[str, Any] | None, text: str | None
+) -> list[bytes]:
+    """Rebuild one block as SSE frames — JSON blocks replay as their typed
+    events so tool activity and citations survive a ring-miss resume (§19)."""
+    frames = [encode_sse(None, BLOCK_START, {"index": index, "type": block_type})]
+    if block_type == "tool_call" and content:
+        frames.append(encode_sse(None, TOOL_CALL, {"index": index, **content}))
+    elif block_type == "tool_result" and content:
+        frames.append(encode_sse(None, TOOL_RESULT, {"index": index, **content}))
+    elif block_type == "citation" and content:
+        frames.append(encode_sse(None, CITATION, {"index": index, **content}))
+    elif text:
+        frames.append(encode_sse(None, DELTA, {"index": index, "text": text}))
+    return frames
+
+
+def _approval_payload(blocks: list[dict[str, Any]], call_id: str) -> dict[str, Any] | None:
+    for block in blocks:
+        content = block.get("content") or {}
+        if block.get("type") == "tool_call" and content.get("call_id") == call_id:
+            return {
+                "call_id": call_id,
+                "name": content.get("name"),
+                "args": content.get("args") or {},
+            }
+    return None
 
 
 def _last_event_id(request: Request) -> int:
@@ -83,13 +128,16 @@ def _attach_response(state: AppState, stream: LiveStream, last_event_id: int) ->
                 floor = int(snap["last_event_id"])
                 yield encode_sse(None, MESSAGE_START, snap["start"])
                 for block in snap["blocks"]:
-                    yield encode_sse(
-                        None, BLOCK_START, {"index": block["index"], "type": block["type"]}
-                    )
-                    if block["text"]:
-                        yield encode_sse(
-                            None, DELTA, {"index": block["index"], "text": block["text"]}
-                        )
+                    for frame_bytes in _block_frames(
+                        block["index"], block["type"], block.get("content"), block.get("text")
+                    ):
+                        yield frame_bytes
+                # a producer parked on an approval must re-ask the rebuilt
+                # client, or the turn dead-waits until the approval timeout
+                for call_id, _future in stream.pending_approvals.items():
+                    payload = _approval_payload(snap["blocks"], call_id)
+                    if payload is not None:
+                        yield encode_sse(None, APPROVAL_REQUIRED, payload)
             elif missed and queue is None:
                 yield encode_sse(None, RESYNC_REQUIRED, {})
                 return
@@ -134,10 +182,9 @@ def _db_replay_response(message: Message, parts: list[MessagePart]) -> Streaming
             },
         )
         for part in sorted(parts, key=lambda p: p.idx):
-            yield encode_sse(None, BLOCK_START, {"index": part.idx, "type": part.type})
             text = (part.content or {}).get("text") or part.text_content or ""
-            if text:
-                yield encode_sse(None, DELTA, {"index": part.idx, "text": text})
+            for frame_bytes in _block_frames(part.idx, part.type, part.content, text):
+                yield frame_bytes
         if message.error:
             yield encode_sse(None, ERROR, message.error)
         yield encode_sse(
@@ -157,12 +204,18 @@ def _db_replay_response(message: Message, parts: list[MessagePart]) -> Streaming
 
 
 async def _resolve_model(
-    state: AppState, user: User, conversation: Conversation, requested: str | None
+    state: AppState,
+    user: User,
+    conversation: Conversation,
+    requested: str | None,
+    agent_version: AgentVersion | None = None,
 ) -> str:
     if requested:
         return requested
     if conversation.model_override:
         return conversation.model_override
+    if agent_version is not None:
+        return agent_version.model
     async with state.db.read_session() as session:
         model = await state.registry.default_model(session, user.settings or {})
     if not model:
@@ -174,6 +227,13 @@ async def _resolve_model(
     return model
 
 
+async def _pinned_agent_version(state: AppState, conversation: Conversation) -> AgentVersion | None:
+    if conversation.agent_version_id is None:
+        return None
+    async with state.db.read_session() as session:
+        return await session.get(AgentVersion, conversation.agent_version_id)
+
+
 async def _start_generation(
     state: AppState,
     user: User,
@@ -183,24 +243,40 @@ async def _start_generation(
     model: str | None,
     chat_params: ChatParams | None,
 ) -> StreamingResponse:
-    resolved_model = await _resolve_model(state, user, conversation, model)
+    agent_version = await _pinned_agent_version(state, conversation)
+    resolved_model = await _resolve_model(state, user, conversation, model, agent_version)
     model_info = state.registry.model_info(resolved_model)
 
-    merged: dict[str, Any] = dict(conversation.params_override or {})
+    # params precedence: agent version < conversation override < request (§9.1)
+    merged: dict[str, Any] = {}
+    if agent_version is not None:
+        merged.update(agent_version.params or {})
+    merged.update(conversation.params_override or {})
     if chat_params is not None:
         merged.update(chat_params.to_provider_params())
     requested_max_output = merged.get("max_tokens")
 
+    system_prompt = (
+        agent_version.system_prompt
+        if agent_version is not None and agent_version.system_prompt
+        else state.settings.default_system_prompt
+    )
+
     async with state.db.read_session() as session:
         thread = await load_thread(session, conversation.id, leaf_id=anchor.id)
         history = to_history(thread)
+        extras = await gather_context_extras(
+            state, session, user=user, conversation=conversation, thread=thread
+        )
         assembled = assemble_context(
-            system_prompt=state.settings.default_system_prompt,
+            system_prompt=system_prompt,
             history=history,
             model_info=model_info,
             requested_max_output=requested_max_output,
             counter=state.counter,
             context_cfg=state.settings.context,
+            memory_block=extras.memory_block,
+            rag_block=extras.rag_block,
         )
         call = await state.registry.prepare_call(
             session,
@@ -209,6 +285,9 @@ async def _start_generation(
             messages=assembled.messages,
             params=merged,
         )
+
+    if model_info.supports_vision:
+        await _attach_vision_images(state, anchor.id, call.messages)
 
     log.debug("context_assembled", **assembled.breakdown)
 
@@ -222,8 +301,15 @@ async def _start_generation(
                 role="assistant",
                 status="streaming",
                 model=resolved_model,
+                agent_version_id=conversation.agent_version_id,
             )
         )
+
+    tools = None
+    if agent_version is not None and (agent_version.tools or agent_version.mcp_servers):
+        from retinue.agents.runtime import ToolExecutor
+
+        tools = ToolExecutor(state, user, agent_version)
 
     stream = state.engine.start_stream(
         user_id=user.id,
@@ -231,9 +317,59 @@ async def _start_generation(
         assistant_message_id=assistant_id,
         client_message_id=anchor.id,
         call=call,
+        agent_version=agent_version,
+        citations=extras.citations,
         generate_title=conversation.title is None,
+        extract_memory=not conversation.is_incognito,
+        tools=tools,
     )
     return _attach_response(state, stream, 0)
+
+
+_VISION_MAX_IMAGES = 4
+_VISION_MAX_BYTES = 5 * 1024 * 1024
+
+
+async def _attach_vision_images(
+    state: AppState, anchor_id: uuid.UUID, messages: list[dict[str, Any]]
+) -> None:
+    """Vision input (§11.7): image attachments on the current user turn become
+    base64 data-URL parts on the final user message (OpenAI shape; LiteLLM
+    translates per provider). Text-only turns are left untouched."""
+    import base64
+
+    from retinue.filesys.base import shard_key
+
+    async with state.db.read_session() as session:
+        rows = (
+            await session.execute(
+                select(File)
+                .join(Attachment, Attachment.file_id == File.id)
+                .where(Attachment.message_id == anchor_id, Attachment.kind == "image")
+                .order_by(File.created_at)
+            )
+        ).all()
+    images: list[str] = []
+    for (file,) in rows:
+        if len(images) >= _VISION_MAX_IMAGES:
+            break
+        if file.status != "ready" or not file.blake3 or file.size > _VISION_MAX_BYTES:
+            continue
+        chunks: list[bytes] = []
+        async for chunk in state.storage.open_range(shard_key(file.blake3), 0, None):
+            chunks.append(chunk)
+        payload = base64.b64encode(b"".join(chunks)).decode()
+        images.append(f"data:{file.mime};base64,{payload}")
+    if not images:
+        return
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            text = message.get("content") or ""
+            message["content"] = [
+                {"type": "text", "text": text},
+                *({"type": "image_url", "image_url": {"url": url}} for url in images),
+            ]
+            return
 
 
 async def _owned_conversation(
@@ -273,6 +409,27 @@ async def send_chat(
     if live is not None and live.user_id == user.id:
         return _attach_response(state, live, last_event_id)
 
+    # a concurrent duplicate POST (network retry) may be mid-setup: reserve
+    # the id; the loser waits for the winner's stream instead of generating
+    # a second sibling (§31.4a)
+    if not state.hub.reserve_client(body.message_id):
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            live = state.hub.get_by_client(body.message_id)
+            if live is not None and live.user_id == user.id:
+                return _attach_response(state, live, last_event_id)
+        raise AppError(
+            CONFLICT, "a duplicate send is still starting; retry", status=409, retryable=True
+        )
+    try:
+        return await _send_chat_inner(state, body, user, last_event_id)
+    finally:
+        state.hub.release_client(body.message_id)
+
+
+async def _send_chat_inner(
+    state: AppState, body: ChatSendRequest, user: User, last_event_id: int
+) -> StreamingResponse:
     async with state.db.read_session() as session:
         existing = await session.get(Message, body.message_id)
 
@@ -294,9 +451,9 @@ async def send_chat(
                 .all()
             )
             newest = children[-1] if children else None
-            parts = []
+            parts: list[MessagePart] = []
             if newest is not None:
-                parts = (
+                parts = list(
                     (
                         await session.execute(
                             select(MessagePart).where(MessagePart.message_id == newest.id)
@@ -328,7 +485,21 @@ async def send_chat(
     if body.conversation_id is not None:
         conversation = await _owned_conversation(state, user, body.conversation_id)
     else:
-        conversation = Conversation(id=uuid7(), user_id=user.id, title=None)
+        agent: Agent | None = None
+        if body.agent_id is not None:
+            async with state.db.read_session() as session:
+                agent = await session.get(Agent, body.agent_id)
+            if agent is None or (
+                agent.owner_id != user.id and agent.visibility not in ("org", "public")
+            ):
+                raise AppError(NOT_FOUND, "agent not found", status=404)
+        conversation = Conversation(
+            id=uuid7(),
+            user_id=user.id,
+            title=None,
+            agent_id=agent.id if agent else None,
+            agent_version_id=agent.current_version_id if agent else None,  # §9.1 pin
+        )
         async with state.db.write_session() as session:
             session.add(conversation)
 
@@ -342,6 +513,21 @@ async def send_chat(
             )
         ).scalar_one_or_none()
 
+    attach_files: list[File] = []
+    if body.file_ids:
+        async with state.db.read_session() as session:
+            rows = (
+                (await session.execute(select(File).where(File.id.in_(body.file_ids))))
+                .scalars()
+                .all()
+            )
+        by_id = {f.id: f for f in rows}
+        for file_id in body.file_ids:
+            f = by_id.get(file_id)
+            if f is None or f.owner_id != user.id or f.status != "ready":
+                raise AppError(NOT_FOUND, f"file {file_id} not found or not ready", status=404)
+            attach_files.append(f)
+
     user_message = Message(
         id=body.message_id,
         conversation_id=conversation.id,
@@ -349,24 +535,32 @@ async def send_chat(
         role="user",
         status="complete",
     )
-    async with state.db.write_session() as session:
-        session.add(user_message)
-        await session.flush()  # message row before its part (FK)
-        session.add(
-            MessagePart(
-                id=uuid7(),
-                message_id=user_message.id,
-                idx=0,
-                type="text",
-                content={"text": body.text},
-                text_content=body.text,
+    try:
+        async with state.db.write_session() as session:
+            session.add(user_message)
+            await session.flush()  # message row before its part (FK)
+            session.add(
+                MessagePart(
+                    id=uuid7(),
+                    message_id=user_message.id,
+                    idx=0,
+                    type="text",
+                    content={"text": body.text},
+                    text_content=body.text,
+                )
             )
-        )
-        await session.execute(
-            update(Conversation)
-            .where(Conversation.id == conversation.id)
-            .values(last_message_at=now_ms(), updated_at=now_ms())
-        )
+            for f in attach_files:
+                kind = "image" if f.mime.startswith("image/") else "document"
+                session.add(Attachment(message_id=user_message.id, file_id=f.id, kind=kind))
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation.id)
+                .values(last_message_at=now_ms(), updated_at=now_ms())
+            )
+    except IntegrityError:
+        # another replica won the same message id (multi-process T3): fall
+        # back to the idempotent existing-message path instead of a 500
+        return await _send_chat_inner(state, body, user, last_event_id)
 
     return await _start_generation(
         state, user, conversation, user_message, model=body.model, chat_params=body.params
@@ -416,6 +610,26 @@ async def regenerate_message(
         model=body.model if body else None,
         chat_params=body.params if body else None,
     )
+
+
+@router.post("/messages/{message_id}/approve")
+async def approve_tool_call(
+    message_id: uuid.UUID,
+    body: ApprovalRequest,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+) -> StopResponse:
+    """Resolve an `approval_required` tool gate (§9.2 ask_user mode)."""
+    state = get_state(request)
+    await _owned_message(state, user, message_id)
+    stream = state.hub.get_by_message(message_id)
+    if stream is None or stream.done:
+        raise AppError(NOT_FOUND, "no live stream awaiting approval", status=404)
+    future = stream.pending_approvals.get(body.call_id)
+    if future is None or future.done():
+        raise AppError(NOT_FOUND, "no pending approval for this call_id", status=404)
+    future.set_result(body.approve)
+    return StopResponse(stopped=True)
 
 
 @router.patch("/messages/{message_id}")

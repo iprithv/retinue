@@ -7,6 +7,11 @@ import { api } from "../lib/api/client";
 import type { ApiKey, Credential } from "../lib/api/types";
 import { keys, useApiKeys, useCredentials } from "../lib/queries";
 import { type Theme, useUi } from "../stores/ui";
+import { ConnectorsSection } from "../features/settings/ConnectorsSection";
+import { DataSection } from "../features/settings/DataSection";
+import { DataSourcesSection } from "../features/settings/DataSourcesSection";
+import { McpSection } from "../features/settings/McpSection";
+import { MemorySection } from "../features/settings/MemorySection";
 
 const PROVIDERS = [
   "openai",
@@ -232,6 +237,11 @@ export function SettingsPage() {
         </div>
         <ProvidersSection />
         <ApiKeysSection />
+        <MemorySection />
+        <ConnectorsSection />
+        <DataSourcesSection />
+        <McpSection />
+        <DataSection />
         <AppearanceSection />
       </div>
     </div>

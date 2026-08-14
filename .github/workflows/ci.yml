@@ -34,6 +34,9 @@ jobs:
         run: |
           ruff check backend/src backend/tests
           ruff format --check backend/src backend/tests
+      - name: types (mypy --strict)
+        run: mypy src/retinue
+        working-directory: backend
       - name: test
         run: python -m pytest backend/tests -q
         env:
@@ -51,6 +54,9 @@ jobs:
       - name: install
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: lint (eslint)
+        working-directory: frontend
+        run: pnpm run lint
       - name: unit tests
         working-directory: frontend
         run: pnpm run test

@@ -21,6 +21,22 @@ EXPECTED_TABLES = {
     "usage_events",
     "audit_log",
     "app_settings",
+    # v0.2-v0.6 wave (migration 0002)
+    "blobs",
+    "files",
+    "upload_sessions",
+    "file_texts",
+    "attachments",
+    "collections",
+    "collection_files",
+    "chunks",
+    "embed_cache",
+    "memories",
+    "mcp_servers",
+    "openapi_actions",
+    "shares",
+    # v0.7 universal data layer (migration 0003)
+    "data_sources",
 }
 
 
@@ -40,7 +56,7 @@ async def test_fresh_upgrade_creates_everything(tmp_path):
     url = f"sqlite+aiosqlite:///{db_path}"
     await run_migrations(url)
     assert EXPECTED_TABLES <= _tables(db_path)
-    assert current_revision_sync(url) == "0001"
+    assert current_revision_sync(url) == "0003"
     # idempotent
     await run_migrations(url)
 

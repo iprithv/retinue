@@ -22,6 +22,9 @@ TITLE = "title"
 MESSAGE_END = "message_end"
 ERROR = "error"
 RESYNC_REQUIRED = "resync_required"
+TOOL_CALL = "tool_call"
+TOOL_RESULT = "tool_result"
+APPROVAL_REQUIRED = "approval_required"
 
 
 def encode_sse(event_id: int | None, event: str, data: dict[str, Any]) -> bytes:

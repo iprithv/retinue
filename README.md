@@ -1,88 +1,173 @@
-# ⚜️ retinue
+<div align="center">
 
-**Your AI retinue.** Self-hosted AI chat & agents for every model — versioned
-custom agents, MCP, RAG, autonomous runs. One command, zero services.
+# ⚜️ Retinue
+
+**Your AI retinue.** Self-hosted AI chat and agents for every model —
+versioned custom agents, tools, RAG, and search in a single process.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](backend/pyproject.toml)
+[![React 19](https://img.shields.io/badge/react-19-61dafb.svg)](frontend/package.json)
 
 ```bash
-pip install retinue && retinue serve     # or: uvx retinue
+pip install retinue && retinue serve
 ```
 
-One OS process. One SQLite file. A React 19 UI served from the same port.
-Streams from 100+ providers (OpenAI, Anthropic, Google, Groq, Mistral,
-DeepSeek, OpenRouter, Ollama, …) through a zero-buffer SSE relay.
+One OS process. One SQLite file. Zero external services.
 
-> **Status: v0.1** — the first slice of the [locked architecture](ARCHITECTURE.md)
-> (§31.6 roadmap): chat + SSE relay, LiteLLM provider layer, SQLite/WAL,
-> auth, cache-stable context assembly, packaging pipeline. Agents, files/RAG,
-> MCP, and the rest land wave by wave.
+</div>
 
-## What's in v0.1
+---
 
-- **Chat over SSE, engineered to spec (§7.4/§19)** — no DB writes on the token
-  path (write-behind batching), per-stream ring buffers with `Last-Event-ID`
-  resume that is *lossless* (ring replay → in-memory snapshot rebuild → DB
-  replay), idempotent sends (retrying a `POST /chat` attaches to the live
-  stream instead of double-generating), stop/regenerate/edit-as-branch,
-  heartbeats, orphan-grace aborts, crash recovery.
-- **Provider layer (D12)** — LiteLLM as a library behind a ~100-line
-  `ProviderAdapter` seam; per-user → org → env credential resolution;
-  provider keys encrypted with AES-256-GCM envelope encryption; model catalog
-  with admin allow/deny policies; cost accounting per usage event.
-- **Auth (§16)** — Argon2id (peppered) passwords, Ed25519 JWTs (15 min),
-  rotating refresh tokens with family-revoking reuse detection, httpOnly
-  cookie + CSRF double-submit for the browser, `rtn_` API keys for scripts,
-  token-bucket rate limits, audit log.
-- **Context engine (§31.1–.2)** — cache-stable prefix ordering for provider
-  prompt caching, deterministic tiered token-budget allocator
-  (byte-identical assembly is CI-tested), tokenizer loading that never blocks
-  a request.
-- **React 19 UI (§6)** — streaming store where a token re-renders exactly one
-  component (rAF-coalesced), incremental markdown with content-hash-memoized
-  stable blocks, Shiki highlighting in a worker, strict CSP, DOMPurify
-  sanitization, dark mode, drafts, conversation management. Initial JS ≤250 KB
-  gz (budget-checked: currently ~208 KB).
-- **Ops** — `retinue doctor`, `retinue db backup` (VACUUM INTO), structured
-  JSON logs with request ids, `/api/healthz` + `/api/readyz`, data export as
-  a zip, background jobs with retry/backoff (conversation titles today).
+Retinue is what you get when a full AI platform refuses to become a stack of
+containers: chat, agents, tools, files, RAG, and search served by a single
+`pip install`-able process with a React UI on the same port. It streams from
+100+ providers — OpenAI, Anthropic, Google, Groq, Mistral, DeepSeek,
+OpenRouter, Ollama, and any OpenAI-compatible endpoint.
 
-Verified in this tree: **83 backend tests** (real-server SSE streaming, resume,
-stop, reuse detection, migrations up/down, determinism), 10 frontend unit
-tests, ruff + tsc strict clean, wheel-install smoke test (cold start ~1.3 s,
-first token overhead ~27 ms with the mock provider).
+## Features
+
+- **Streaming chat, engineered end to end** — a zero-buffer SSE relay with no
+  database writes on the token path, lossless `Last-Event-ID` resume after
+  network drops, idempotent sends, stop/regenerate, and crash recovery.
+- **Versioned agents** — build agents in a studio with a live test bench.
+  Every edit creates an immutable new version; conversations pin the version
+  they started with and never silently change behavior. Revert, export, and
+  import agents as portable `.agent.json` files.
+- **Tools** — agents can search the web (SearXNG, Tavily, Brave, Serper, or
+  Jina), fetch and read web pages, query your files, generate images, and run
+  code in a sandbox. Attach any [MCP](https://modelcontextprotocol.io) server
+  (stdio or HTTP) or paste an OpenAPI spec to turn its operations into tools,
+  guarded by a strict SSRF policy. Sensitive tools can require per-call user
+  approval, streamed live into the chat.
+- **Databases as agent sources** — connect 25+ engines (PostgreSQL, MySQL,
+  MariaDB, SQL Server, Oracle, Snowflake, BigQuery, Redshift, Databricks,
+  ClickHouse, DuckDB, Trino/Presto, SQLite, CockroachDB, TiDB, StarRocks,
+  TimescaleDB, QuestDB, MongoDB, Redis, Cassandra/Scylla, DynamoDB,
+  Elasticsearch, OpenSearch, Neo4j, InfluxDB, …) and let agents query them —
+  **read-only by construction**: single-SELECT AST validation, automatic row
+  limits, table allow/deny lists, PII masking, per-statement audit logging,
+  and a staged connection tester (DNS → TCP → auth → probe → introspect) so
+  "connection failed" is never a mystery.
+- **One-click connectors** — a curated gallery (Slack, GitHub, GitLab,
+  Jira/Confluence, Linear, Notion, Google Drive, Grafana, Prometheus,
+  Datadog, Sentry, New Relic, Splunk, PagerDuty, Opsgenie, Kubernetes, AWS,
+  Zendesk, ServiceNow, Intercom, Discord, …) that installs pinned MCP servers
+  or minimal API actions with encrypted credentials. Anything not in the
+  gallery still plugs in through raw MCP or OpenAPI.
+- **Files & knowledge** — drag-and-drop uploads with resumable transfers and
+  BLAKE3 content addressing (identical files are stored once — and never
+  re-uploaded). Text is extracted, chunked structure-aware, embedded with a
+  content-hash cache, and retrieved with hybrid BM25 + vector search. Answers
+  cite their sources.
+- **Search everything** — `⌘K` full-text search across messages,
+  conversations, files, and agents, powered by SQLite FTS5 with
+  as-you-type prefix matching.
+- **Memory you can inspect** — Retinue proposes durable facts for your
+  approval (or extracts them automatically, or never — your choice), shows
+  you exactly what it knows, and injects only what's relevant. Incognito
+  conversations are always excluded.
+- **Branching conversations** — edit any message or regenerate any reply to
+  create a branch, and switch between alternatives inline.
+- **Vision & images** — attach images and vision-capable models see them;
+  agents can generate images that land in your file library.
+- **Multi-user ready** — accounts with roles, per-user encrypted provider
+  keys (AES-256-GCM), rotating refresh tokens with reuse detection, API keys,
+  rate limits, an audit log, and an admin panel with usage and cost rollups.
+- **Your data is yours** — share conversations by link, export everything as
+  a zip, import it elsewhere. No telemetry.
 
 ## Quickstart
 
 ```bash
-pip install retinue
-retinue serve                # http://127.0.0.1:8000
+pip install retinue        # or: uvx retinue
+retinue serve              # http://127.0.0.1:8000
 ```
 
-Create the first account (it becomes the owner), add a provider key in
-Settings — or export `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`
-before starting — and chat. Details: [docs/quickstart.md](docs/quickstart.md).
+Open the URL, create the first account (it becomes the owner), and add a
+provider API key in **Settings** — or export one before starting:
 
-Docker: `docker compose -f deploy/docker-compose.yml up`.
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY, GEMINI_API_KEY, ...
+retinue serve
+```
 
-## Repository layout
+More detail in [docs/quickstart.md](docs/quickstart.md).
+
+### Docker
+
+```bash
+docker compose -f deploy/docker-compose.yml up
+```
+
+## Configuration
+
+Everything is configurable via `RETINUE_*` environment variables or
+`~/.retinue/config.toml` — CLI flags > env > file > defaults. A few common
+knobs:
+
+| Setting | Purpose |
+|---|---|
+| `RETINUE_SERVER__PORT` | listen port (default 8000) |
+| `RETINUE_MODELS__DEFAULT` | default model, e.g. `anthropic/claude-sonnet-4-5` |
+| `RETINUE_DATABASE_URL` | switch SQLite → PostgreSQL |
+| `RETINUE_SECRET` | master secret for encryption at rest (auto-generated otherwise) |
+| `RETINUE_TOOLS__WEB_SEARCH__PROVIDER` | `searxng`, `tavily`, `brave`, `serper`, or `jina` |
+| `RETINUE_TOOLS__IMAGE_GEN_MODEL` | e.g. `openai/dall-e-3` to enable image generation |
+
+Optional extras: `retinue[extract]` (PDF/DOCX/XLSX text extraction),
+`retinue[sandbox-wasm]` (WASM code sandbox), `retinue[postgres]`, and one
+extra per datasource driver family (`retinue[mysql]`, `retinue[snowflake]`,
+`retinue[mongodb]`, … or `retinue[datasources]` for the common set).
+
+`retinue doctor` diagnoses a deployment; `retinue db backup` takes a
+consistent snapshot.
+
+## How it's built
+
+The design doctrine: *Python and TypeScript are the ergonomic shells; Rust
+and C do the computing.* FastAPI + SQLAlchemy over SQLite/WAL (or Postgres),
+LiteLLM as a library behind a thin provider seam, orjson/blake3/tiktoken on
+the hot paths, and a React 19 SPA where an arriving token re-renders exactly
+one component. The complete specification lives in
+[ARCHITECTURE.md](ARCHITECTURE.md); deliberate deviations are documented in
+[docs/development.md](docs/development.md).
 
 ```
 backend/    Python package (FastAPI + SQLAlchemy + LiteLLM; `retinue` CLI)
 frontend/   React 19 SPA (Vite, Tailwind v4, TanStack Query, zustand)
 deploy/     Dockerfile, compose
-scripts/    build_frontend_into_wheel.py, gen_ts_client.py
-proto/      sandbox.proto — pre-cut gRPC seam (unused in v1 by design, §3.1)
+scripts/    build/codegen helpers
 docs/       quickstart, development guide
 ```
-
-`ARCHITECTURE.md` (repo root) is the locked specification this implements;
-deviations shipped in v0.1 are called out in [docs/development.md](docs/development.md)
-and inline where they live.
 
 ## Development
 
 ```bash
-just setup && just test     # see docs/development.md
+just setup     # venv + backend deps + frontend deps
+just dev-api   # backend with reload (mock provider enabled)
+just dev-web   # vite dev server
+just test      # backend + frontend suites
 ```
 
-MIT licensed. Contributions welcome — DCO sign-off required, security reports
-via [SECURITY.md](SECURITY.md).
+See [docs/development.md](docs/development.md) for the full loop, test
+architecture, and conventions.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+ground rules, dev setup (no API key needed: a deterministic mock provider
+drives everything, including the tool loop), and how to add engines,
+connectors, and tools. Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md); releases are tracked in the
+[CHANGELOG](CHANGELOG.md).
+
+## Security
+
+Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
+Provider keys and tool credentials are encrypted at rest; nothing ever leaves
+your server except the model calls you configure.
+
+## License
+
+[MIT](LICENSE)

@@ -28,7 +28,8 @@ test-frontend:
 
 lint:
     cd backend && ../.venv/bin/ruff check src tests && ../.venv/bin/ruff format --check src tests
-    cd frontend && corepack pnpm run typecheck
+    cd backend && ../.venv/bin/python -m mypy src/retinue
+    cd frontend && corepack pnpm run lint && corepack pnpm run typecheck
 
 fmt:
     cd backend && ../.venv/bin/ruff format src tests && ../.venv/bin/ruff check --fix src tests

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from fastapi import Request
 
 if TYPE_CHECKING:
+    from retinue.agents.mcp_manager import McpManager
     from retinue.config import Settings
     from retinue.core.chat_engine import ChatEngine
     from retinue.core.crypto import SecretBox
@@ -15,10 +16,12 @@ if TYPE_CHECKING:
     from retinue.core.streams import StreamHub
     from retinue.core.tokens import TokenCounter
     from retinue.db.session import Database
+    from retinue.filesys.base import StorageBackend
     from retinue.jobs.queue import JobQueue
     from retinue.jobs.worker import JobWorker
     from retinue.providers.pricing import PricingTable
     from retinue.providers.registry import ProviderRegistry
+    from retinue.sandbox.base import ExecutionBackend
 
 
 @dataclass
@@ -36,6 +39,9 @@ class AppState:
     box: "SecretBox"
     limiter: "RateLimiter"
     counter: "TokenCounter"
+    storage: "StorageBackend"
+    mcp: "McpManager"
+    sandbox: "ExecutionBackend"
 
 
 def get_state(request: Request) -> AppState:

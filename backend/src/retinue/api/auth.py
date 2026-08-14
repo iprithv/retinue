@@ -241,6 +241,7 @@ async def refresh(
             )
     if reuse_detected:
         raise AppError(UNAUTHORIZED, "refresh token reuse detected; session revoked", status=401)
+    assert user is not None  # set on every non-reuse path above
     if via_cookie:
         _set_cookies(state, request, response, raw_refresh)
         return _token_response(state, access, user)

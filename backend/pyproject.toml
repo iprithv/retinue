@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "retinue"
-version = "0.1.0"
-description = "Your AI retinue - self-hosted, multi-provider AI chat platform. One command, zero services."
+version = "0.7.0"
+description = "Your AI retinue - self-hosted, multi-provider AI platform with versioned agents, RAG, tools, and search. One command, zero services."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -45,18 +45,45 @@ dependencies = [
   "pyjwt[crypto]>=2.9",
   "litellm>=1.55",
   "typer>=0.15",
+  "python-multipart>=0.0.12",
+  "mcp>=1.2",
+  "sqlglot>=25",
 ]
 
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.30", "psycopg[binary]>=3.2"]
+extract = ["pypdfium2>=4.30", "python-docx>=1.1", "python-calamine>=0.3", "selectolax>=0.3"]
+sandbox-wasm = ["wasmtime>=25"]
+# datasource engine drivers (§30.2) — lazy-imported, one extra per engine family
+duckdb = ["duckdb>=1.0"]
+mysql = ["aiomysql>=0.2"]
+clickhouse = ["clickhouse-connect>=0.7"]
+trino = ["trino>=0.330"]
+mssql = ["pymssql>=2.3"]
+oracle = ["oracledb>=2.4"]
+snowflake = ["snowflake-connector-python>=3.12"]
+bigquery = ["google-cloud-bigquery>=3.25"]
+databricks = ["databricks-sql-connector>=3.4"]
+mongodb = ["motor>=3.6"]
+redis = ["redis>=5.1"]
+elasticsearch = ["elasticsearch>=8.15"]
+opensearch = ["opensearch-py>=2.7"]
+cassandra = ["cassandra-driver>=3.29"]
+dynamodb = ["aioboto3>=13.2"]
+neo4j = ["neo4j>=5.25"]
+influxdb = ["influxdb-client>=1.46"]
+datasources = [
+  "retinue[duckdb,mysql,clickhouse,trino,mongodb,redis,elasticsearch,opensearch,neo4j,influxdb,postgres]",
+]
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
   "hypothesis>=6.115",
   "ruff>=0.8",
   "mypy>=1.13",
+  "duckdb>=1.0",  # exercised by the datasource engine tests
 ]
-all = ["retinue[postgres]"]
+all = ["retinue[postgres,extract,sandbox-wasm,datasources]"]
 
 [project.scripts]
 retinue = "retinue.cli:main"
@@ -96,6 +123,7 @@ ignore = ["B008"] # FastAPI Depends() in defaults is idiomatic
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ASYNC", "RUF029"]
+"src/retinue/db/migrations/versions/*" = ["E501", "B007"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -108,3 +136,14 @@ exclude = ["src/retinue/db/migrations/"]
 module = ["litellm", "litellm.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# optional datasource drivers (§30.2) — lazy-imported extras, absent from the core env
+module = [
+  "asyncpg", "aiomysql", "clickhouse_connect", "trino", "trino.*", "pymssql",
+  "oracledb", "snowflake", "snowflake.*", "databricks", "databricks.*",
+  "google.cloud", "google.cloud.*", "google.oauth2", "motor", "motor.*",
+  "redis", "redis.*", "cassandra", "cassandra.*", "aioboto3", "elasticsearch",
+  "opensearchpy", "neo4j", "influxdb_client",
+]
+ignore_missing_imports = true

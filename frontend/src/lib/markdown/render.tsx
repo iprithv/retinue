@@ -51,7 +51,7 @@ const StableBlock = memo(function StableBlock({ source }: { source: string }) {
   const html = useMemo(() => renderMarkdown(source), [source]);
   const ref = useRef<HTMLDivElement | null>(null);
   useShikiUpgrade(ref, html);
-  // eslint-disable-next-line react/no-danger
+  // sanitized upstream by DOMPurify (§6.4) — the only innerHTML sink in the app
   return <div ref={ref} className="md" dangerouslySetInnerHTML={{ __html: html }} />;
 });
 

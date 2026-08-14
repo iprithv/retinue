@@ -1,4 +1,16 @@
-import { MoreHorizontal, Pin, PinOff, Plus, Settings, SquarePen, Trash2 } from "lucide-react";
+import {
+  FolderOpen,
+  MoreHorizontal,
+  Pin,
+  PinOff,
+  Plus,
+  Search,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  SquarePen,
+  Trash2,
+} from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -58,6 +70,36 @@ export function Sidebar() {
         >
           <SquarePen className="size-4" />
         </Link>
+      </div>
+
+      <div className="space-y-0.5 px-2 pb-1">
+        <button
+          onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }))}
+          className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-surface-3 hover:text-ink"
+        >
+          <Search className="size-4" /> Search
+          <kbd className="ml-auto rounded border border-line px-1 text-[10px]">⌘K</kbd>
+        </button>
+        <Link
+          to="/agents"
+          className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-surface-3 hover:text-ink"
+        >
+          <Sparkles className="size-4" /> Agents
+        </Link>
+        <Link
+          to="/files"
+          className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-surface-3 hover:text-ink"
+        >
+          <FolderOpen className="size-4" /> Files
+        </Link>
+        {user?.role === "owner" || user?.role === "admin" ? (
+          <Link
+            to="/admin"
+            className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-surface-3 hover:text-ink"
+          >
+            <ShieldCheck className="size-4" /> Admin
+          </Link>
+        ) : null}
       </div>
 
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">

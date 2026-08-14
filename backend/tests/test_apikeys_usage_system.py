@@ -69,7 +69,7 @@ async def test_export_zip(app_client):
     assert response.status_code == 200
     archive = zipfile.ZipFile(io.BytesIO(response.content))
     names = set(archive.namelist())
-    assert {"conversations.jsonl", "messages.jsonl", "manifest.json"} <= names
+    assert {"conversations.jsonl", "agents.jsonl", "memories.jsonl", "manifest.json"} <= names
     assert b"exported" in archive.read("conversations.jsonl")
 
 

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-EventKind = Literal["text_delta", "thinking_delta", "usage", "stop"]
+EventKind = Literal["text_delta", "thinking_delta", "tool_use", "usage", "stop"]
 
 
 @dataclass(slots=True)
@@ -19,11 +19,22 @@ class Usage:
 
 
 @dataclass(slots=True)
+class ToolUse:
+    """One complete tool invocation request from the model (§19: args arrive
+    complete — adapters accumulate streamed argument deltas internally)."""
+
+    call_id: str
+    name: str
+    args: dict[str, Any]
+
+
+@dataclass(slots=True)
 class NormalizedEvent:
     kind: EventKind
     text: str = ""
     usage: Usage | None = None
-    stop_reason: str | None = None  # end|length|filtered
+    stop_reason: str | None = None  # end|length|filtered|tool_use
+    tool_use: "ToolUse | None" = None
 
 
 @dataclass(slots=True)
@@ -46,6 +57,18 @@ class ChatCall:
     params: dict[str, Any] = field(default_factory=dict)
     api_key: str | None = None
     api_base: str | None = None
+    # OpenAI-shape tool definitions: [{type: "function", function: {name, ...}}]
+    tools: list[dict[str, Any]] = field(default_factory=list)
+
+
+async def aclose_events(events: AsyncIterator["NormalizedEvent"]) -> None:
+    """Close a provider event stream (cancels the underlying request).
+
+    The protocol types it as AsyncIterator; concrete adapters return async
+    generators, which carry aclose()."""
+    close = getattr(events, "aclose", None)
+    if close is not None:
+        await close()
 
 
 class ProviderError(Exception):

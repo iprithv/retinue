@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose an improvement
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today? Describe the situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        How would it work? Note the ground rules: no new always-on services;
+        heavier machinery goes behind an existing seam as an optional tier.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "do nothing" — why isn't the current behavior enough?

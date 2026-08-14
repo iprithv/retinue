@@ -1,8 +1,11 @@
 /** Scroll pins to bottom while streaming unless the user scrolls up, then a
- * "jump to latest" pill appears (§6.5). */
+ * "jump to latest" pill appears (§6.5). The visible thread is computed
+ * client-side from the branch tree (§17). */
 import { ArrowDown } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Message } from "../../lib/api/types";
+import { computeThread } from "../../lib/branching";
+import { useBranches } from "../../stores/branch";
 import { useConversationStreamId, useStreamingMessage } from "../../stores/streaming";
 import { MessageItem } from "./MessageItem";
 import { StreamingMessage } from "./StreamingMessage";
@@ -11,19 +14,31 @@ export function MessageList({
   conversationId,
   messages,
   onRegenerate,
+  onResend,
+  onApprove,
 }: {
   conversationId: string;
   messages: Message[];
   onRegenerate: (assistantMessageId: string) => void;
+  onResend: (userMessageId: string) => void;
+  onApprove: (assistantMessageId: string, callId: string, ok: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
 
+  const selections = useBranches((s) => s.selections[conversationId]);
+  const select = useBranches((s) => s.select);
+
   const streamingId = useConversationStreamId(conversationId);
   const streamingSnapshot = useStreamingMessage(streamingId);
+
+  const { thread, siblings } = useMemo(
+    () => computeThread(messages, selections),
+    [messages, selections],
+  );
   // completed row may already be in the cache when the stream entry lingers
-  const visible = streamingId ? messages.filter((m) => m.id !== streamingId) : messages;
+  const visible = streamingId ? thread.filter((m) => m.id !== streamingId) : thread;
   const lastAssistantId = [...visible].reverse().find((m) => m.role === "assistant")?.id;
 
   const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
@@ -39,10 +54,9 @@ export function MessageList({
     setShowJump(!nearBottom);
   };
 
-  // pin to bottom on new content while the user hasn't scrolled up
   useEffect(() => {
     if (atBottomRef.current) scrollToBottom();
-  }, [messages.length, streamingSnapshot?.version]);
+  }, [visible.length, streamingSnapshot?.version]);
 
   useEffect(() => {
     scrollToBottom();
@@ -61,10 +75,23 @@ export function MessageList({
               key={message.id}
               message={message}
               isLastAssistant={message.id === lastAssistantId && !streamingId}
+              siblingInfo={siblings.get(message.id)}
               onRegenerate={onRegenerate}
+              onSelectBranch={(parentKey, childId) =>
+                select(conversationId, parentKey, childId)
+              }
+              onEditSaved={(parentKey, newMessageId) => {
+                select(conversationId, parentKey, newMessageId);
+                onResend(newMessageId);
+              }}
             />
           ))}
-          {streamingId ? <StreamingMessage messageId={streamingId} /> : null}
+          {streamingId ? (
+            <StreamingMessage
+              messageId={streamingId}
+              onApprove={(callId, ok) => onApprove(streamingId, callId, ok)}
+            />
+          ) : null}
           <div className="h-2" />
         </div>
       </div>

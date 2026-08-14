@@ -1,6 +1,6 @@
 # Security Policy
 
-Retinue ships with a security posture from v0.1 (§27.9 of the architecture
+Retinue ships with a security posture from the first release (§27.9 of the architecture
 spec): private disclosure, a 90-day coordinated-release window, and CVE
 requests for confirmed vulnerabilities.
 

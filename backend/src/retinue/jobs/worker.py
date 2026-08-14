@@ -29,6 +29,8 @@ class JobContext:
     registry: ProviderRegistry
     hub: StreamHub
     counter: TokenCounter
+    jobs: "JobQueue | None" = None
+    state: Any = None  # AppState back-reference for RAG/memory handlers
 
 
 Handler = Callable[[JobContext, dict[str, Any]], Awaitable[None]]

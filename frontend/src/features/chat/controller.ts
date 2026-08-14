@@ -115,8 +115,53 @@ export function useChatController(conversationId: string | undefined) {
                     void finalize(liveConversationId, assistantId);
                   }
                   break;
+                case "tool_call": {
+                  const data = event.data as {
+                    index: number;
+                    call_id: string;
+                    name: string;
+                    args: Record<string, unknown>;
+                  };
+                  if (assistantId) {
+                    streaming.jsonBlock(assistantId, data.index, "tool_call", data);
+                  }
+                  break;
+                }
+                case "tool_result": {
+                  const data = event.data as {
+                    index: number;
+                    call_id: string;
+                    status: string;
+                    summary: string;
+                  };
+                  if (assistantId) {
+                    streaming.jsonBlock(assistantId, data.index, "tool_result", data);
+                  }
+                  break;
+                }
+                case "citation": {
+                  const data = event.data as {
+                    index: number;
+                    n: number;
+                    file_id: string;
+                    file_name?: string;
+                  };
+                  if (assistantId) {
+                    streaming.jsonBlock(assistantId, data.index, "citation", data);
+                  }
+                  break;
+                }
+                case "approval_required": {
+                  const data = event.data as {
+                    call_id: string;
+                    name: string;
+                    args: Record<string, unknown>;
+                  };
+                  if (assistantId) streaming.addApproval(assistantId, data);
+                  break;
+                }
                 default:
-                  break; // usage/title/citation: nothing to do in v0.1
+                  break; // usage/title: nothing to render here
               }
             },
           });
@@ -145,7 +190,11 @@ export function useChatController(conversationId: string | undefined) {
   );
 
   const send = useCallback(
-    (text: string, model: string | undefined) => {
+    (
+      text: string,
+      model: string | undefined,
+      options?: { agentId?: string; fileIds?: string[] },
+    ) => {
       const messageId = uuid7();
       if (conversationId) {
         // optimistic user-message insert (§6.3): identity minted client-side
@@ -173,6 +222,8 @@ export function useChatController(conversationId: string | undefined) {
           conversation_id: conversationId,
           text,
           model,
+          agent_id: options?.agentId,
+          file_ids: options?.fileIds?.length ? options.fileIds : undefined,
         },
         optimisticConversationId: conversationId,
       });
@@ -188,6 +239,27 @@ export function useChatController(conversationId: string | undefined) {
     void api(`/api/messages/${assistantId}/stop`, { method: "POST", body: {} }).catch(() => {});
   }, []);
 
+  /** Re-POST an existing user message id (edit-then-send, §31.4a). */
+  const resend = useCallback(
+    (messageId: string) => {
+      if (!conversationId) return;
+      void run({
+        path: "/api/chat",
+        payload: { message_id: messageId },
+        optimisticConversationId: conversationId,
+      });
+    },
+    [conversationId, run],
+  );
+
+  const approve = useCallback((assistantMessageId: string, callId: string, ok: boolean) => {
+    streaming.resolveApproval(assistantMessageId, callId);
+    void api(`/api/messages/${assistantMessageId}/approve`, {
+      method: "POST",
+      body: { call_id: callId, approve: ok },
+    }).catch(() => {});
+  }, []);
+
   const regenerate = useCallback(
     (assistantMessageId: string, model: string | undefined) => {
       if (!conversationId) return;
@@ -200,5 +272,5 @@ export function useChatController(conversationId: string | undefined) {
     [conversationId, run],
   );
 
-  return { send, stop, regenerate, sendError };
+  return { send, stop, regenerate, resend, approve, sendError };
 }

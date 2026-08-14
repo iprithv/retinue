@@ -49,6 +49,9 @@ class LiveStream:
         # set by the producer: () -> dict with the full in-memory message state,
         # used to rebuild a subscriber whose Last-Event-ID fell off the ring
         self.snapshot: Callable[[], dict[str, Any]] | None = None
+        # §9.2 ask_user tool approvals: call_id -> decision future, resolved by
+        # POST /messages/{id}/approve while the producer waits
+        self.pending_approvals: dict[str, asyncio.Future[bool]] = {}
 
 
 class StreamHub:
@@ -60,6 +63,9 @@ class StreamHub:
         self._orphan_grace_s = orphan_grace_s
         self._by_message: dict[uuid.UUID, LiveStream] = {}
         self._by_client: dict[uuid.UUID, LiveStream] = {}
+        # client message ids whose send is mid-setup (§31.4a): a concurrent
+        # duplicate POST waits for the stream instead of double-generating
+        self._reserved_clients: set[uuid.UUID] = set()
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -86,6 +92,17 @@ class StreamHub:
             producer(stream), name=f"chat-producer-{message_id.hex[:8]}"
         )
         return stream
+
+    def reserve_client(self, client_message_id: uuid.UUID) -> bool:
+        """False when this client id already has a live stream or an in-flight
+        setup — the caller should attach instead of generating."""
+        if client_message_id in self._by_client or client_message_id in self._reserved_clients:
+            return False
+        self._reserved_clients.add(client_message_id)
+        return True
+
+    def release_client(self, client_message_id: uuid.UUID) -> None:
+        self._reserved_clients.discard(client_message_id)
 
     def get_by_message(self, message_id: uuid.UUID) -> LiveStream | None:
         return self._by_message.get(message_id)
